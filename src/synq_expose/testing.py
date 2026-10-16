@@ -44,13 +44,15 @@ def wait_for(z: zenoh.Session, selector: str, timeout: float = 5.0) -> None:
 class Network:
     server: Session
     client: Session
+    endpoint: str
+    """Where the server listens, for other processes to connect to."""
 
     @classmethod
     def open(cls) -> "Network":
         endpoint = f"tcp/127.0.0.1:{free_port()}"
         server = Session(config=build_zenoh_config(listen=[endpoint], environ={}), base_topic=SERVER_ROOT)
         client = Session(config=build_zenoh_config(connect=[endpoint], environ={}), base_topic="client")
-        return cls(server, client)
+        return cls(server, client, endpoint)
 
     @property
     def z(self) -> zenoh.Session:

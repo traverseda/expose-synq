@@ -2,7 +2,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
@@ -25,6 +25,34 @@ console_err = Console(stderr=True)
 def fail(message: str) -> typer.Exit:
     console_err.print(f"[red]Error:[/red] {message}")
     return typer.Exit(1)
+
+
+# zenoh connection options, shared by every command that opens a session
+Public = Annotated[bool, typer.Option(
+    "--public",
+    help="Turn on zenoh's normal multicast + gossip scouting, so peers on the network find "
+         "and connect to us. Opens no listener by itself (see --listen).",
+)]
+Connect = Annotated[list[str], typer.Option(
+    "--connect", "-c",
+    help="Zenoh endpoint to connect to, e.g. tcp/relay.example.com:7447. Repeatable.",
+)]
+Listen = Annotated[list[str], typer.Option(
+    "--listen", "-l",
+    help="Zenoh endpoint to listen on. Repeatable.",
+)]
+ZenohConfigFile = Annotated[Optional[Path], typer.Option(
+    "--zenoh-config", exists=True, dir_okay=False,
+    envvar=["EXPOSE_SYNQ_ZENOH_CONFIG", "ZENOH_CONFIG"],
+    help="Zenoh JSON5 config (scouting, TLS, auth, access_control), merged over a base that "
+         "neither listens, connects nor scouts.",
+)]
+ZenohKeys = Annotated[list[str], typer.Option(
+    "--zenoh", "-Z",
+    help="Set one zenoh config key, e.g. -Z scouting/multicast/interface=eth1. Repeatable. "
+         "Env form: EXPOSE_SYNQ_ZENOH__SCOUTING__MULTICAST__INTERFACE=eth1. "
+         "Precedence: base < config file < env < -Z < --connect/--listen.",
+)]
 
 
 @app.callback()
@@ -113,31 +141,11 @@ def share(
     ),
 
     # ── Zenoh connection ────────────────────────────────────────────────
-    public: bool = typer.Option(
-        False, "--public",
-        help="Turn on zenoh's normal multicast + gossip scouting, so peers on the network find "
-             "and connect to us. Opens no listener by itself (see --listen).",
-    ),
-    connect: list[str] = typer.Option(
-        [], "--connect", "-c",
-        help="Zenoh endpoint to connect to, e.g. tcp/relay.example.com:7447. Repeatable.",
-    ),
-    listen: list[str] = typer.Option(
-        [], "--listen", "-l",
-        help="Zenoh endpoint to listen on. Repeatable.",
-    ),
-    zenoh_config: Optional[Path] = typer.Option(
-        None, "--zenoh-config", exists=True, dir_okay=False,
-        envvar=["EXPOSE_SYNQ_ZENOH_CONFIG", "ZENOH_CONFIG"],
-        help="Zenoh JSON5 config (scouting, TLS, auth, access_control), merged over a base that "
-             "neither listens, connects nor scouts.",
-    ),
-    zenoh: list[str] = typer.Option(
-        [], "--zenoh", "-Z",
-        help="Set one zenoh config key, e.g. -Z scouting/multicast/interface=eth1. Repeatable. "
-             "Env form: EXPOSE_SYNQ_ZENOH__SCOUTING__MULTICAST__INTERFACE=eth1. "
-             "Precedence: base < config file < env < -Z < --connect/--listen.",
-    ),
+    public: Public = False,
+    connect: Connect = [],
+    listen: Listen = [],
+    zenoh_config: ZenohConfigFile = None,
+    zenoh: ZenohKeys = [],
 ):
     """Expose WORKSPACE over SpiriSynq so a remote agent can work in it."""
     if not allow_execute:
@@ -228,3 +236,64 @@ def print_banner(config: ExposeConfig, path: str) -> None:
     if config.allow_execute and not config.exec.sandbox.enabled:
         console_err.print("  [bold red]commands run as you with full access to this machine[/bold red]")
     console_err.print("[dim]Ctrl+C to stop[/dim]")
+
+
+@app.command()
+def mount(
+    topic: str = typer.Argument(
+        ..., help="The share's topic, e.g. <hostname>/expose/<folder>, as `synq topic list --type Workspace` shows it.",
+    ),
+    mountpoint: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
+    timeout: float = typer.Option(10.0, "--timeout", help="Seconds to wait for the share to answer."),
+    debug: bool = typer.Option(False, "--debug", help="Print every FUSE call (libfuse's -d)."),
+    public: Public = False,
+    connect: Connect = [],
+    listen: Listen = [],
+    zenoh_config: ZenohConfigFile = None,
+    zenoh: ZenohKeys = [],
+):
+    """Mount the share at TOPIC on MOUNTPOINT with FUSE, until Ctrl+C or `fusermount3 -u MOUNTPOINT`."""
+    try:
+        zenoh_cfg = build_zenoh_config(zenoh_config, zenoh, connect, listen, public=public)
+    except ZenohConfigError as e:
+        raise fail(str(e))
+    try:
+        import synq_expose.mount as fuse_mount     # loads libfuse
+    except OSError as e:
+        raise fail(f"{e}: install libfuse 3, or set FUSE_LIBRARY_PATH to libfuse3.so")
+
+    from SpiriSynq.session import current_session
+    from synq_expose.config import reopen_session
+    from synq_expose.fs import FsRead, FsWrite
+
+    topic = topic.rstrip("/")
+    session = current_session.get()
+    reopen_session(session, zenoh_cfg)
+    mirrors = []
+    try:
+        if not answers(session.zenoh_session, f"{topic}/fs/read/sr_metadata", timeout):
+            raise fail(f"nothing answers on {topic}/fs/read; check the topic and --connect")
+        mirrors.append(FsRead.from_topic(f"{topic}/fs/read"))
+        writable = answers(session.zenoh_session, f"{topic}/fs/write/sr_metadata", 1.0)
+        if writable:
+            mirrors.append(FsWrite.from_topic(f"{topic}/fs/write"))
+        operations = fuse_mount.SynqFS(session.zenoh_session, mirrors[0], mirrors[1] if writable else None)
+        console_err.print(f"Mounting [bold]{topic}[/bold] on [bold]{mountpoint}[/bold]"
+                          f" ({'read/write' if writable else 'read-only'})")
+        console_err.print(f"[dim]Ctrl+C or fusermount3 -u {mountpoint} to unmount[/dim]")
+        fuse_mount.mount(operations, str(mountpoint), read_only=not writable, fsname=topic, debug=debug)
+    finally:
+        for mirror in mirrors:
+            mirror.close()
+        session.close()
+
+
+def answers(z, selector: str, timeout: float) -> bool:
+    """Whether something answers ``selector`` within ``timeout``. Remote declarations take a moment to arrive."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if list(z.get(selector, timeout=min(0.5, timeout))):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)

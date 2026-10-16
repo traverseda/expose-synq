@@ -10,6 +10,7 @@ expose-synq share ./ -w -x --no-sandbox         # exec runs unconfined, as you
 expose-synq share ~/proj -x --confirm           # approve each write and command
 expose-synq share . -w -c tcp/relay:7447
 expose-synq share . --public                    # findable by any zenoh peer on the network
+expose-synq mount host/expose/proj ~/mnt -c tcp/host:7447   # the share as a local filesystem (FUSE)
 ```
 
 Only reading is allowed unless you ask for more. Each capability is its own object, created only when granted:
@@ -109,6 +110,17 @@ The file may grow, as with `tail -f`: to follow it, stream again from where the 
 
 Find exposed workspaces with `synq topic list --type Workspace`.
 
+## Mounting
+
+`expose-synq mount TOPIC MOUNTPOINT` mounts a share with FUSE (libfuse 3, through mfusepy), until Ctrl+C or `fusermount3 -u MOUNTPOINT`. It takes the same zenoh options as `share`. A share without `--allow-write` mounts read-only. On NixOS, point `FUSE_LIBRARY_PATH` at `libfuse3.so`.
+
+Each FUSE call is the RPC of the same name, and an open file is a ticket: a read ticket, a write ticket, or both for `O_RDWR`. A remote error's errno reaches the program as is: excluded paths are ENOENT, read-only ones EROFS.
+
+- Writes return once they're sent. `close(2)` and `fsync` wait for them, so a failed write shows up there at the latest, as on NFS.
+- The mount sees its own writes: `stat` and reads wait for its writes in flight to that path first.
+- A file truncated or replaced by someone else fails a read with EIO (the ticket's `FileChangedError`). Truncates through the same mount don't.
+- There are no RPCs for `readlink`, `symlink`, `link`, `chown` or timestamps, so those fail with ENOSYS. Symlinks are listed but can't be followed, and `touch` on an existing file fails.
+
 ## Limitation: no access control
 
 This prototype has **no access control**. expose-synq doesn't check who's calling, and it doesn't configure or rely on Zenoh `access_control`. Anyone who can reach the node over Zenoh can call every capability you granted, including `--allow-execute`. Only run it on networks you trust. The default config has no connectivity, while `--public` makes it reachable by every Zenoh peer on the network.
@@ -148,7 +160,7 @@ uv run python bench/bench.py [--quick] [--json out.json]
 uv run expose-synq share --help
 ```
 
-Tests and benchmarks run a real two-node network: the share on one SpiriSynq session, the agent on another, joined over TCP on loopback with scouting off (`synq_expose.testing`). The agent side uses SpiriSynq mirrors for RPCs and `synq_expose.client` for ticket streams. Behaviour that's specified but still a stub is tested under a strict `xfail`, so implementing it makes the test fail until the marker is removed. Sandbox tests skip when `bwrap` isn't installed.
+Tests and benchmarks run a real two-node network: the share on one SpiriSynq session, the agent on another, joined over TCP on loopback with scouting off (`synq_expose.testing`). The agent side uses SpiriSynq mirrors for RPCs and `synq_expose.client` for ticket streams. Behaviour that's specified but still a stub is tested under a strict `xfail`, so implementing it makes the test fail until the marker is removed. Sandbox tests skip when `bwrap` isn't installed, and mount tests without FUSE (`/dev/fuse`, `fusermount3`, libfuse).
 
 The benchmark's file cases go layer by layer, with each layer's share of native file I/O: native, zenoh serving the same bytes from memory, then the ticket. Run it after every change to the data path; the layer whose share drops is where the regression is. It runs on tmpfs, since disk writeback makes the native baseline swing. Both nodes share one process (and the GIL) there; for numbers that matter, run a real `expose-synq share` and a client in separate processes.
 
@@ -156,7 +168,8 @@ To see where a layer's time goes, profile the server with py-spy (0.4.2 or later
 
 Layout (`src/synq_expose/`):
 
-- `cli.py`: the Typer app (`share` subcommand); validates flags into an `ExposeConfig` and serves
+- `cli.py`: the Typer app (`share` and `mount`); validates flags into an `ExposeConfig` and serves
+- `mount.py`: `SynqFS`, the FUSE operations over the RPCs and tickets
 - `config.py`: `ExposeConfig` and friends, plus the layered zenoh config and `reopen_session()`
 - `workspace.py`: the `Workspace` object, and `build_objects()`, which creates one object per granted capability
 - `tickets.py`: `TicketRegistry`, which creates, serves and revokes tickets

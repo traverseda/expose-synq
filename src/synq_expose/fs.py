@@ -4,6 +4,7 @@ The RPCs here only carry small values. File contents always move over
 tickets (tickets.py): ``open_read`` / ``open_write`` return one.
 Every method takes a workspace-relative ``path`` first.
 """
+import errno
 import hashlib
 import json
 import os
@@ -189,7 +190,7 @@ class FsWrite(SyncableObject):
         source = self._policy.resolve(path, write=True, nofollow=True)
         dest = self._policy.resolve(to, write=True, nofollow=True, is_dir=source.is_dir() and not source.is_symlink())
         if self._policy.root in (source, dest):
-            raise PolicyError("can't rename the workspace root")
+            raise PolicyError("can't rename the workspace root", errno.EBUSY)
         if S_ISDIR(source.lstat().st_mode):
             self._check_tree_writable(source)
         os.rename(source, dest)
@@ -197,7 +198,7 @@ class FsWrite(SyncableObject):
     def _check_tree_writable(self, top: Path) -> None:
         for p, st in _entries_below(top):
             if not self._policy.is_writable(p, S_ISDIR(st.st_mode)):
-                raise PolicyError(f"{p.relative_to(self._policy.root).as_posix()!r} is read-only")
+                raise PolicyError(f"{p.relative_to(self._policy.root).as_posix()!r} is read-only", errno.EROFS)
 
     @remote_method()
     def mkdir(self, path: str, parents: bool = False) -> None:
@@ -216,7 +217,7 @@ class FsWrite(SyncableObject):
         self._guard.check("delete", path=path, recursive=recursive)
         target = self._policy.resolve(path, write=True, nofollow=True)
         if target == self._policy.root:
-            raise PolicyError("can't delete the workspace root")
+            raise PolicyError("can't delete the workspace root", errno.EBUSY)
         if not S_ISDIR(target.lstat().st_mode):
             target.unlink()
         elif not recursive:

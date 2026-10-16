@@ -3,6 +3,7 @@
 Every remote path goes through :meth:`PathPolicy.resolve` before it touches
 the filesystem. Remote paths are always relative to the workspace root.
 """
+import errno
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,7 +13,14 @@ from synq_expose.config import ExposeConfig
 
 
 class PolicyError(PermissionError):
-    """A remote path is outside the workspace, hidden, or read-only."""
+    """A remote path is outside the workspace, hidden, or read-only.
+
+    Carries an errno like any OSError, so it reaches the remote as
+    ``[Errno N] message`` and a mount can hand the errno to the kernel.
+    """
+
+    def __init__(self, message: str, code: int = errno.EACCES):
+        super().__init__(code, message)
 
 
 @dataclass
@@ -51,9 +59,10 @@ class PathPolicy:
         if checked.resolve() != checked:
             raise PolicyError(f"{remote_path!r} goes through a symlink")
         if not self.is_visible(lexical, is_dir):
-            raise PolicyError(f"{remote_path!r} is not exposed")
+            raise PolicyError(f"{remote_path!r} is not exposed", errno.ENOENT)
         if write and not self.is_writable(lexical, is_dir):
-            raise PolicyError("workspace is read-only" if not self.allow_write else f"{remote_path!r} is read-only")
+            raise PolicyError("workspace is read-only" if not self.allow_write else f"{remote_path!r} is read-only",
+                              errno.EROFS)
         return lexical
 
     def _match_key(self, path: Path, is_dir: bool | None) -> str | None:
