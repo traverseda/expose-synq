@@ -11,10 +11,6 @@ import pathspec
 from synq_expose.config import ExposeConfig
 
 
-# Characters with meaning in zenoh key expressions and selectors.
-KEY_RESERVED = frozenset("*$#?")
-
-
 class PolicyError(PermissionError):
     """A remote path is outside the workspace, hidden, or read-only."""
 
@@ -28,48 +24,53 @@ class PathPolicy:
 
     @classmethod
     def from_config(cls, config: ExposeConfig) -> "PathPolicy":
-        patterns = list(config.exclude)
-        if config.gitignore:
-            # TODO: nested .gitignore files, and re-reading when they change.
-            gitignore = config.workspace / ".gitignore"
-            if gitignore.is_file():
-                patterns += gitignore.read_text().splitlines()
         return cls(
             root=config.workspace.resolve(),
-            exclude=pathspec.GitIgnoreSpec.from_lines(patterns),
+            exclude=pathspec.GitIgnoreSpec.from_lines(config.exclude),
             readonly=pathspec.GitIgnoreSpec.from_lines(config.readonly_paths),
             allow_write=config.allow_write,
         )
 
-    def resolve(self, remote_path: str, *, write: bool = False) -> Path:
+    def resolve(self, remote_path: str, *, write: bool = False, nofollow: bool = False,
+                is_dir: bool | None = None) -> Path:
         """Map a workspace-relative path to an absolute host path, or raise PolicyError.
 
-        Paths are meant to be carried in zenoh keys and checked by zenoh ACLs
-        (see fs.py), so a path must name exactly the file its key names. That
-        rules out ``.``/``..``/empty segments, wildcard characters, and any
-        symlink along the way, each of which could lead outside what an ACL
-        rule on that key allows.
-        """
-        stripped = remote_path.strip("/")
-        parts = stripped.split("/") if stripped not in ("", ".") else []
-        for part in parts:
-            if part in ("", ".", "..") or any(c in part for c in KEY_RESERVED):
-                raise PolicyError(f"{remote_path!r}: invalid path segment {part!r}")
-        lexical = self.root.joinpath(*parts)
-        if lexical.resolve() != lexical:
-            raise PolicyError(f"{remote_path!r} goes through a symlink")
-        target = lexical
-        rel = target.relative_to(self.root).as_posix()
-        if rel != "." and self.exclude.match_file(rel):
-            raise PolicyError(f"{remote_path!r} is not exposed")
-        if write:
-            if not self.allow_write:
-                raise PolicyError("workspace is read-only")
-            if rel != "." and self.readonly.match_file(rel):
-                raise PolicyError(f"{remote_path!r} is read-only")
-        return target
+        ``..`` segments and symlinks along the way are refused: either could
+        lead outside the workspace, or to an excluded or read-only path under
+        a name that isn't.
 
-    def is_visible(self, path: Path) -> bool:
-        """Whether a host path under the root should show up in listings/globs."""
+        ``nofollow`` allows the last segment to be a symlink, for calls that
+        act on the link itself (lstat, unlink). ``is_dir`` says whether the
+        target is a directory for pattern matching, when it doesn't exist yet.
+        """
+        parts = [part for part in remote_path.split("/") if part not in ("", ".")]
+        if ".." in parts:
+            raise PolicyError(f"{remote_path!r}: '..' isn't allowed")
+        lexical = self.root.joinpath(*parts)
+        checked = lexical.parent if nofollow and parts else lexical
+        if checked.resolve() != checked:
+            raise PolicyError(f"{remote_path!r} goes through a symlink")
+        if not self.is_visible(lexical, is_dir):
+            raise PolicyError(f"{remote_path!r} is not exposed")
+        if write and not self.is_writable(lexical, is_dir):
+            raise PolicyError("workspace is read-only" if not self.allow_write else f"{remote_path!r} is read-only")
+        return lexical
+
+    def _match_key(self, path: Path, is_dir: bool | None) -> str | None:
+        """``path`` relative to the root as gitignore patterns see it (directories end in ``/``), or None for the root."""
+        if path == self.root:
+            return None
+        if is_dir is None:
+            is_dir = path.is_dir() and not path.is_symlink()
         rel = path.relative_to(self.root).as_posix()
-        return not self.exclude.match_file(rel)
+        return rel + "/" if is_dir else rel
+
+    def is_visible(self, path: Path, is_dir: bool | None = None) -> bool:
+        """Whether a host path under the root is exposed, and should show up in listings/globs."""
+        key = self._match_key(path, is_dir)
+        return key is None or not self.exclude.match_file(key)
+
+    def is_writable(self, path: Path, is_dir: bool | None = None) -> bool:
+        """Whether a host path under the root may be changed. Doesn't check visibility."""
+        key = self._match_key(path, is_dir)
+        return self.allow_write and (key is None or not self.readonly.match_file(key))

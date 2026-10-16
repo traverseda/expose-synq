@@ -8,9 +8,7 @@
                                           and spawn (tickets.py)
 
 An object is only created for a granted capability, so an ungranted one has
-nothing on the network to call. Each capability gets its own key prefix so
-Zenoh ACL rules could target it later. The prototype doesn't use ACLs (see the
-README's "Limitation: no access control"). Every remote method calls
+nothing on the network to call. Every remote method calls
 ``self._guard.check(...)`` first, for --confirm and the audit log.
 """
 from dataclasses import dataclass

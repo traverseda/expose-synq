@@ -71,10 +71,6 @@ def share(
         True, "--default-excludes/--no-default-excludes",
         help=f"Also hide likely secrets: {', '.join(DEFAULT_EXCLUDES)}.",
     ),
-    gitignore: bool = typer.Option(
-        True, "--gitignore/--no-gitignore",
-        help="Also hide files matched by .gitignore.",
-    ),
     readonly_paths: list[str] = typer.Option(
         [], "--read-only", "-r",
         help="Glob of paths that stay read-only even with --allow-write (e.g. .git/**). Repeatable.",
@@ -164,7 +160,6 @@ def share(
         allow_execute=allow_execute,
         exclude=(*(DEFAULT_EXCLUDES if default_excludes else ()), *exclude),
         readonly_paths=tuple(readonly_paths),
-        gitignore=gitignore,
         exec=ExecConfig(
             sandbox=SandboxConfig(
                 enabled=sandbox,

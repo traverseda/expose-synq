@@ -9,7 +9,6 @@ import time
 import pytest
 from SpiriSynq.remote_callables import RpcException
 
-from conftest import stub
 from synq_expose import client
 from synq_expose.client import TicketError
 from synq_expose.fs import CHUNK_SIZE, FsRead, FsWrite
@@ -90,8 +89,6 @@ def test_open_read_returns_stat_and_hidden_ticket(ro):
 @pytest.mark.parametrize("path", [
     "../outside",
     "src/../.env",
-    "./src/main.py",
-    "src//main.py",
     ".env",          # default excludes
     "missing.txt",
     "src",           # a directory
@@ -804,62 +801,199 @@ def test_write_gives_up_when_nothing_answers(rw):
 
 # ── Directory operations ────────────────────────────────────────────────────
 
-@stub
 def test_list_dir_hides_excluded(ro):
-    names = {e["name"] for e in ro.mirror(FsRead, "/fs/read").list_dir(".")}
-    assert names == {"src"}
+    entries = list(ro.mirror(FsRead, "/fs/read").list_dir("."))
+    assert [e["name"] for e in entries] == ["src"]
+    assert entries[0]["type"] == "dir"
+    assert list(ro.mirror(FsRead, "/fs/read").list_dir("src")) == [{
+        "name": "main.py", **ro.mirror(FsRead, "/fs/read").stat("src/main.py")}]
 
 
-@stub
+def test_list_dir_hides_excluded_directories(share):
+    s = share(exclude=("secrets/",))
+    (s.workspace / "secrets").mkdir()
+    (s.workspace / "secrets" / "k").write_text("x")
+    fs = s.mirror(FsRead, "/fs/read")
+    assert list(fs.list_dir(".")) == []
+    with pytest.raises(RpcException, match="not exposed"):
+        list(fs.list_dir("secrets"))
+
+
+def test_list_dir_refuses_a_file(ro):
+    with pytest.raises(RpcException):
+        list(ro.mirror(FsRead, "/fs/read").list_dir("src/main.py"))
+
+
 def test_stat(ro):
+    (ro.workspace / "src" / "main.py").chmod(0o640)
     st = ro.mirror(FsRead, "/fs/read").stat("src/main.py")
-    assert st["type"] == "file" and st["size"] == 12
+    assert st == {"type": "file", "size": 12, "mode": 0o640,
+                  "mtime": (ro.workspace / "src" / "main.py").stat().st_mtime}
+    assert ro.mirror(FsRead, "/fs/read").stat("src")["type"] == "dir"
 
 
-@stub
+def test_stat_is_lstat(ro):
+    (ro.workspace / "link").symlink_to("/etc/passwd")
+    assert ro.mirror(FsRead, "/fs/read").stat("link")["type"] == "symlink"
+    with pytest.raises(RpcException, match="symlink"):
+        ro.mirror(FsRead, "/fs/read").open_read("link")
+
+
+def test_stat_missing(ro):
+    with pytest.raises(RpcException):
+        ro.mirror(FsRead, "/fs/read").stat("nope")
+
+
 def test_glob_skips_excluded(ro):
     (ro.workspace / "src" / "x.pem").write_text("key")
-    assert ro.mirror(FsRead, "/fs/read").glob(".", "**/*") == ["src/main.py"]
+    assert list(ro.mirror(FsRead, "/fs/read").glob(".", "**/*")) == ["src", "src/main.py"]
 
 
-@stub
+def test_glob_is_relative_to_path(ro):
+    (ro.workspace / "src" / "pkg").mkdir()
+    (ro.workspace / "src" / "pkg" / "a.py").write_text("")
+    (ro.workspace / "top.py").write_text("")
+    fs = ro.mirror(FsRead, "/fs/read")
+    assert list(fs.glob("src", "*.py")) == ["src/main.py"]
+    assert list(fs.glob("src", "**/*.py")) == ["src/main.py", "src/pkg/a.py"]
+    assert list(fs.glob(".", "*.py")) == ["top.py"]
+
+
+def test_glob_doesnt_follow_symlinks(ro, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "o.py").write_text("")
+    (ro.workspace / "out").symlink_to(outside)
+    assert list(ro.mirror(FsRead, "/fs/read").glob(".", "**/*.py")) == ["src/main.py"]
+
+
 def test_grep(ro):
     matches = list(ro.mirror(FsRead, "/fs/read").grep(".", "print"))
     assert matches == [{"path": "src/main.py", "line": 1, "text": "print('hi')"}]
 
 
-@stub
 def test_grep_skips_excluded(ro):
     assert list(ro.mirror(FsRead, "/fs/read").grep(".", "SECRET")) == []
 
 
-@stub
+def test_grep_regex_lines_and_binary(ro):
+    (ro.workspace / "src" / "a.txt").write_bytes(b"one\ntwo\nthree\xff\n")
+    (ro.workspace / "src" / "b.bin").write_bytes(b"two\0")
+    matches = list(ro.mirror(FsRead, "/fs/read").grep("src", r"^t"))
+    assert matches == [{"path": "src/a.txt", "line": 2, "text": "two"},
+                       {"path": "src/a.txt", "line": 3, "text": "three�"}]
+
+
+def test_grep_one_file(ro):
+    assert [m["line"] for m in ro.mirror(FsRead, "/fs/read").grep("src/main.py", "hi")] == [1]
+
+
+def test_grep_bad_regex(ro):
+    with pytest.raises(RpcException):
+        list(ro.mirror(FsRead, "/fs/read").grep(".", "("))
+
+
 def test_edit_file_replaces_exactly_one(rw):
     (rw.workspace / "e.txt").write_text("a b a")
     fs = rw.mirror(FsWrite, "/fs/write")
-    with pytest.raises(RpcException):
-        fs.edit_file("e.txt", "a", "c")   # two matches
+    with pytest.raises(RpcException, match="2 times"):
+        fs.edit_file("e.txt", "a", "c")
+    with pytest.raises(RpcException, match="0 times"):
+        fs.edit_file("e.txt", "z", "c")
     fs.edit_file("e.txt", "b", "c")
     assert (rw.workspace / "e.txt").read_text() == "a c a"
+    assert files(rw.workspace) == {"src", ".git", "existing.txt", "e.txt"}   # no temp file left
 
 
-@stub
+def test_edit_file_renames_over_and_keeps_mode(rw):
+    path = rw.workspace / "e.txt"
+    path.write_text("hello")
+    path.chmod(0o751)
+    t = rw.mirror(FsRead, "/fs/read").open_read("e.txt")["ticket"]
+    before = path.stat().st_ino
+    rw.mirror(FsWrite, "/fs/write").edit_file("e.txt", "hello", "bye")
+    assert path.stat().st_ino != before and path.stat().st_mode & 0o777 == 0o751
+    with pytest.raises(TicketError, match="replaced"):   # as for a reader of a file sed -i rewrote
+        read_bytes(rw.z, t)
+
+
+def test_edit_file_refuses_readonly(rw):
+    (rw.workspace / ".git" / "HEAD").write_text("ref")
+    with pytest.raises(RpcException, match="read-only"):
+        rw.mirror(FsWrite, "/fs/write").edit_file(".git/HEAD", "ref", "x")
+
+
+def test_chmod(rw):
+    fs = rw.mirror(FsWrite, "/fs/write")
+    fs.chmod("existing.txt", 0o700)
+    assert (rw.workspace / "existing.txt").stat().st_mode & 0o7777 == 0o700
+    with pytest.raises(RpcException, match="permission bits"):
+        fs.chmod("existing.txt", 0o10000)
+    with pytest.raises(RpcException, match="read-only"):
+        fs.chmod(".git", 0o777)
+
+
+def test_open_write_exclusive(rw):
+    fs = rw.mirror(FsWrite, "/fs/write")
+    with pytest.raises(RpcException, match="exists"):
+        fs.open_write("existing.txt", truncate=False, exclusive=True)
+    assert (rw.workspace / "existing.txt").read_bytes() == b"old\n"
+    client.write_all(rw.z, fs.open_write("fresh.txt", truncate=False, exclusive=True)["ticket"], b"x")
+    assert (rw.workspace / "fresh.txt").read_bytes() == b"x"
+
+
 def test_mkdir_and_delete(rw):
     fs = rw.mirror(FsWrite, "/fs/write")
     fs.mkdir("a/b", parents=True)
+    fs.mkdir("a/b", parents=True)          # mkdir -p: already there is fine
     assert (rw.workspace / "a" / "b").is_dir()
+    with pytest.raises(RpcException):
+        fs.mkdir("a/b")                    # plain mkdir: it exists
+    with pytest.raises(RpcException):
+        fs.mkdir("x/y")                    # plain mkdir: no parent
     with pytest.raises(RpcException):
         fs.delete("a")                     # not empty
     fs.delete("a", recursive=True)
     assert not (rw.workspace / "a").exists()
 
 
-@stub
+def test_delete_file_and_symlink(rw, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside") / "keep"
+    outside.write_text("x")
+    (rw.workspace / "link").symlink_to(outside)
+    fs = rw.mirror(FsWrite, "/fs/write")
+    fs.delete("existing.txt")
+    fs.delete("link")                      # the link goes, not what it points to
+    assert files(rw.workspace) == {"src", ".git"}
+    assert outside.read_text() == "x"
+
+
+def test_delete_recursive_doesnt_follow_symlinks(rw, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "keep").write_text("x")
+    (rw.workspace / "src" / "link").symlink_to(outside)
+    rw.mirror(FsWrite, "/fs/write").delete("src", recursive=True)
+    assert not (rw.workspace / "src").exists()
+    assert (outside / "keep").read_text() == "x"
+
+
 def test_delete_refuses_readonly(rw):
     fs = rw.mirror(FsWrite, "/fs/write")
     with pytest.raises(RpcException, match="read-only"):
         fs.delete(".git", recursive=True)
     assert (rw.workspace / ".git").is_dir()
+
+
+def test_delete_refuses_trees_holding_hidden_or_readonly_paths(rw):
+    (rw.workspace / "src" / ".env").write_text("SECRET=1")
+    fs = rw.mirror(FsWrite, "/fs/write")
+    with pytest.raises(RpcException, match="aren't exposed"):
+        fs.delete("src", recursive=True)
+    assert (rw.workspace / "src" / ".env").exists()
+
+
+def test_delete_refuses_the_root(rw):
+    with pytest.raises(RpcException, match="root"):
+        rw.mirror(FsWrite, "/fs/write").delete(".", recursive=True)
 
 
 @pytest.mark.parametrize("readahead", ["auto", "on", "off"])
@@ -927,3 +1061,60 @@ def test_read_ahead_passes_errors_through():
     assert next(items) == 1
     with pytest.raises(OSError, match="disk on fire"):
         next(items)
+
+
+def test_rename_replaces_the_destination(rw):
+    fs = rw.mirror(FsWrite, "/fs/write")
+    t = rw.mirror(FsRead, "/fs/read").open_read("existing.txt")["ticket"]
+    client.write_all(rw.z, fs.open_write("src/.existing.tmp", truncate=False, exclusive=True)["ticket"], b"new\n")
+    fs.rename("src/.existing.tmp", "existing.txt")   # the safe rewrite: new file, then rename over
+    assert (rw.workspace / "existing.txt").read_bytes() == b"new\n"
+    assert files(rw.workspace) == {"src", ".git", "existing.txt"}
+    with pytest.raises(TicketError, match="replaced"):
+        read_bytes(rw.z, t)
+
+
+def test_rename_moves_directories_and_symlinks(rw):
+    (rw.workspace / "src" / "a.py").write_text("x")
+    (rw.workspace / "link").symlink_to("/etc")
+    fs = rw.mirror(FsWrite, "/fs/write")
+    fs.rename("src", "lib")
+    fs.rename("link", "lib/link")
+    assert files(rw.workspace) == {"lib", "lib/a.py", "lib/link", ".git", "existing.txt"}
+    assert (rw.workspace / "lib" / "link").readlink().as_posix() == "/etc"
+
+
+@pytest.mark.parametrize("path, to, error", [
+    ("existing.txt", ".git/x", "read-only"),
+    (".git", "git", "read-only"),
+    ("existing.txt", ".env", "not exposed"),
+    ("existing.txt", ".", "root"),
+    ("existing.txt", "../out", "invalid"),
+    ("missing", "x", "No such file"),
+])
+def test_rename_refuses(rw, path, to, error):
+    with pytest.raises(RpcException, match=error):
+        rw.mirror(FsWrite, "/fs/write").rename(path, to)
+
+
+def test_rename_refuses_a_tree_holding_readonly_paths(share):
+    s = share(allow_write=True, readonly_paths=("*.lock",))
+    (s.workspace / "a").mkdir()
+    (s.workspace / "a" / "uv.lock").write_text("")
+    with pytest.raises(RpcException, match="read-only"):
+        s.mirror(FsWrite, "/fs/write").rename("a", "b")
+    assert (s.workspace / "a" / "uv.lock").exists()
+
+
+
+@pytest.mark.parametrize("name", [
+    "a*b?c$d#e=f&g h",
+    pytest.param("a;b", marks=pytest.mark.xfail(
+        strict=True, reason="SpiriSynq passes RPC arguments as selector parameters without escaping ';'")),
+])
+def test_names_with_odd_characters(rw, name):
+    path = f"src/{name}"
+    fs = rw.mirror(FsWrite, "/fs/write")
+    client.write_all(rw.z, fs.open_write(path, truncate=True)["ticket"], b"x")
+    assert list(rw.mirror(FsRead, "/fs/read").glob("src", "*")) == [path]
+    assert rw.mirror(FsRead, "/fs/read").stat(path)["size"] == 1

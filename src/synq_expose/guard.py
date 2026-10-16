@@ -38,6 +38,6 @@ class Guard:
 
 # Operations that change something or run something; --confirm prompts for these.
 CONFIRM_OPERATIONS = frozenset({
-    "open_write", "edit_file", "mkdir", "delete",
+    "open_write", "edit_file", "rename", "chmod", "mkdir", "delete",
     "spawn",
 })

@@ -12,7 +12,7 @@ expose-synq share . -w -c tcp/relay:7447
 expose-synq share . --public                    # findable by any zenoh peer on the network
 ```
 
-Only reading is allowed unless you ask for more. Each capability is its own object, created only when granted, under its own key prefix:
+Only reading is allowed unless you ask for more. Each capability is its own object, created only when granted:
 
 ```
 <topic>                 Workspace     what's exposed and what's granted
@@ -21,6 +21,25 @@ Only reading is allowed unless you ask for more. Each capability is its own obje
 <topic>/shell           Shell         --allow-execute
 <root>/tickets/@<secret>              byte streams: file reads/writes, processes
 ```
+
+The filesystem RPCs follow the Unix calls they're named after. They act on symlinks, never through them, and skip or refuse excluded paths:
+
+```
+FsRead   stat(path)                     lstat → {type, size, mtime, mode}
+         list_dir(path)                 streams {name, type, size, mtime, mode}, by name
+         glob(path, pattern)            streams paths; pattern relative to path, ** for any depth
+         grep(path, regex)              streams {path, line, text}; binary files skipped
+         hash(path, algorithm)          "sha256:<hex>"
+         open_read(path)                read ticket
+FsWrite  open_write(path, truncate, exclusive=False)    write ticket; exclusive is O_EXCL
+         edit_file(path, old, new)      replace exactly one match, by temp file + rename (sed -i)
+         rename(path, to)               rename(2): atomic, replaces to; EXDEV across mounts
+         chmod(path, mode)
+         mkdir(path, parents=False)     parents: mkdir -p
+         delete(path, recursive=False)  unlink, rmdir, or rm -r
+```
+
+`delete(recursive=True)` refuses a tree holding excluded or read-only paths before removing anything, since the caller can't see what it would destroy. Directory patterns match directories as in `.gitignore`, so `.git/**` makes `.git` itself read-only.
 
 File contents and process output never travel through SpiriSynq RPCs. `open_read`, `open_write` and `spawn` return a **ticket**: a few raw zenoh queryables under `<root>/tickets/@<secret>`, where `<root>` is the node's base topic. Each ticket's stream protocol is in the docstrings of `FileReadStream`, `FileWriteStream` and `ProcessStreams`.
 
@@ -67,7 +86,7 @@ A consumer that keeps up never meets a limit.
 
 The file may grow, as with `tail -f`: to follow it, stream again from where the last stream ended. A read or stream fails with `FileChangedError` if the file is replaced (a different inode at the path, which is what most editors do on save) or truncated (smaller than the ticket has seen it). Call `open_read` again for the new file. Bytes rewritten in place aren't detected, as with any Unix reader. To check a read, hash what you received and compare it with `FsRead.hash(path)`.
 
-**Write ticket**, from `FsWrite.open_write(path, truncate)` → `{ticket, size, ttl}`:
+**Write ticket**, from `FsWrite.open_write(path, truncate, exclusive)` → `{ticket, size, ttl}`:
 
 ```
 @t/write/{offset, data}    → pwrite data at offset
@@ -96,11 +115,7 @@ This prototype has **no access control**. expose-synq doesn't check who's callin
 
 Tickets (`<root>/tickets/@<secret>`) can't be found by wildcard queries or subscriptions, because Zenoh wildcards never match an `@` segment. But a ticket is a bearer secret: anyone who learns its key can use it.
 
-The intended fix is Zenoh ACLs, not an access-control layer of our own. That needs:
-
-- **Paths in keys** (#245), so rules can scope filesystem access by path, e.g. allow `…/fs/write/*/src/**`. `PathPolicy` already rejects any path that couldn't be a key: `..`, `.`, empty segments, wildcard characters and symlinks.
-- **ACL behaviour for `@` keys.** Wildcards can't match `@` segments, so it's unverified whether a rule on `<root>/tickets/**` can gate a node's tickets at all (see #205, #207).
-- **Rules for each capability prefix** (`fs/read`, `fs/write`, `shell`). These are expressible today but untested. The fix also needs a worked example config and tests, along the lines of #228.
+Who can reach the node is zenoh's job: TLS and `transport/auth` in its config (see below). Within the workspace, `PathPolicy` keeps paths inside the root (no `..`, no symlinks along the way) and applies the excludes and read-only paths.
 
 ## Zenoh configuration
 
@@ -147,7 +162,7 @@ Layout (`src/synq_expose/`):
 - `tickets.py`: `TicketRegistry`, which creates, serves and revokes tickets
 - `fs.py`: `FsRead`, `FsWrite`, and the file read/write streams
 - `shell.py`: `Shell`, `ProcessStreams` (pull-based output by offset, after traverseda/zenoh-fs)
-- `policy.py`: path confinement, excludes, read-only globs; paths must name exactly the file their key would
+- `policy.py`: path confinement, excludes, read-only globs
 - `guard.py`: `--confirm` and the audit log
 - `sandbox.py`: bubblewrap argv
 - `client.py`: the agent side of the ticket streams

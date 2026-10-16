@@ -2,30 +2,28 @@
 
 The RPCs here only carry small values. File contents always move over
 tickets (tickets.py): ``open_read`` / ``open_write`` return one.
-
-Every method takes the workspace-relative ``path`` first. The intent (#245) is
-for ``path`` to be carried in the key, ``<topic>/fs/write/open_write/src/main.py``,
-so Zenoh ACL rules could scope by path. Until SpiriSynq supports that,
-``path_method`` is a plain remote method and the path travels as a query
-parameter. The prototype doesn't use ACLs either way (see the README).
-
-There's no ``move``: it takes two paths, and only one can be in the key.
+Every method takes a workspace-relative ``path`` first.
 """
 import hashlib
 import json
 import os
 import queue
 import re
+import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from stat import S_IMODE, S_ISDIR, S_ISLNK, S_ISREG
 
 import zenoh
 from loguru import logger
 from SpiriSynq.remote_callables import remote_method
 from SpiriSynq.syncable_objects import SyncableObject
+
+from synq_expose.policy import PathPolicy, PolicyError
 
 CHUNK_SIZE = 1 << 20
 
@@ -35,44 +33,78 @@ def file_digest(path: Path, algorithm: str) -> str:
         return f"{algorithm}:{hashlib.file_digest(f, algorithm).hexdigest()}"
 
 
-def path_method():
-    """A remote method whose ``path`` argument belongs in the key expression. See the module docstring."""
-    return remote_method()
-
 
 @dataclass
 class FsRead(SyncableObject):
-    @path_method()
-    def list_dir(self, path: str = ".") -> list[dict]:
-        """Entries in ``path``: name, type, size, mtime. Hidden paths are omitted."""
+    @remote_method()
+    def list_dir(self, path: str = ".") -> Iterator[dict]:
+        """Stream the entries in ``path``, by name: ``stat`` plus ``name``. Excluded paths are omitted."""
         self._guard.check("list_dir", path=path)
-        raise NotImplementedError
+        for p, st in _entries(self._policy, self._policy.resolve(path)):
+            yield {"name": p.name, **_stat(st)}
 
-    @path_method()
+    @remote_method()
     def stat(self, path: str) -> dict:
+        """lstat: ``{"type", "size", "mtime", "mode"}``. ``type`` is file, dir, symlink or other; ``mode`` the permission bits."""
         self._guard.check("stat", path=path)
-        raise NotImplementedError
+        return _stat(self._policy.resolve(path, nofollow=True).lstat())
 
-    @path_method()
+    @remote_method()
     def hash(self, path: str, algorithm: str = "sha256") -> str:
         """``"<algorithm>:<hexdigest>"``, so a client can skip re-reading unchanged files."""
         self._guard.check("hash", path=path)
         return file_digest(self._policy.resolve(path), algorithm)
 
-    @path_method()
-    def glob(self, path: str, pattern: str) -> list[str]:
-        """Matches for ``pattern`` under ``path``."""
+    @remote_method()
+    def glob(self, path: str, pattern: str) -> Iterator[str]:
+        """Stream the workspace-relative paths under ``path`` that match ``pattern``.
+
+        Depth first, each directory's entries by name, a directory before
+        what's in it.
+
+        ``pattern`` is relative to ``path``. ``*`` matches within a segment and
+        ``**`` any number of segments, as in ``pathlib``; dotfiles match like
+        any other name. Directories match too. Symlinks aren't followed, and
+        excluded paths are skipped.
+        """
         self._guard.check("glob", path=path, pattern=pattern)
-        raise NotImplementedError
+        top = self._policy.resolve(path)
+        depth = None if "**" in pattern else pattern.count("/") + 1
+        for p, _ in _walk(self._policy, top, depth):
+            if PurePosixPath(p.relative_to(top).as_posix()).full_match(pattern):
+                yield p.relative_to(self._policy.root).as_posix()
 
-    @path_method()
+    @remote_method()
     def grep(self, path: str, pattern: str) -> Iterator[dict]:
-        """Stream ``{path, line, text}`` matches under ``path``."""
-        self._guard.check("grep", path=path, pattern=pattern)
-        raise NotImplementedError
-        yield
+        """Stream ``{path, line, text}`` for each line matching the regex ``pattern``.
 
-    @path_method()
+        ``path`` is a file or a directory to search under. Like grep: lines
+        are numbered from 1, files with a NUL byte in their first 8 KiB are
+        binary and skipped, symlinks aren't followed. Excluded paths are
+        skipped. ``text`` is the line without its newline, decoded as UTF-8
+        with undecodable bytes replaced.
+        """
+        self._guard.check("grep", path=path, pattern=pattern)
+        regex = re.compile(pattern.encode())
+        top = self._policy.resolve(path)
+        found = [(top, top.stat())] if top.is_file() else _walk(self._policy, top)
+        for p, st in found:
+            if not S_ISREG(st.st_mode):
+                continue
+            try:
+                f = p.open("rb")
+            except OSError:
+                continue
+            with f:
+                if b"\0" in f.read(8192):
+                    continue
+                f.seek(0)
+                rel = p.relative_to(self._policy.root).as_posix()
+                for n, line in enumerate(f, 1):
+                    if regex.search(line):
+                        yield {"path": rel, "line": n, "text": line.rstrip(b"\n").decode(errors="replace")}
+
+    @remote_method()
     def open_read(self, path: str) -> dict:
         """Mint a read ticket for ``path``. Returns ``{"ticket", "size", "mtime"}``. See ``FileReadStream``.
 
@@ -91,36 +123,148 @@ class FsRead(SyncableObject):
 
 @dataclass
 class FsWrite(SyncableObject):
-    @path_method()
-    def open_write(self, path: str, truncate: bool) -> dict:
+    @remote_method()
+    def open_write(self, path: str, truncate: bool, exclusive: bool = False) -> dict:
         """Open ``path`` for writing, creating it if missing, and mint a ticket for it.
 
         ``truncate`` empties an existing file first; there's no default, since
-        either one can wreck a file. Returns ``{"ticket", "size"}``, the size
-        after opening. See ``FileWriteStream``.
+        either one can wreck a file. ``exclusive`` (O_EXCL) fails if ``path``
+        already exists, so a temp file can't land on someone else's.
+        Returns ``{"ticket", "size", "ttl"}``, the size after opening. See
+        ``FileWriteStream``.
         """
-        self._guard.check("open_write", path=path, truncate=truncate)
+        self._guard.check("open_write", path=path, truncate=truncate, exclusive=exclusive)
         target = self._policy.resolve(path, write=True)
-        stream = FileWriteStream(target, truncate)
+        stream = FileWriteStream(target, truncate, exclusive)
         ticket = self._tickets.mint("write", stream.routes(), on_revoke=stream.close)
         stream.ticket = ticket
         return {"ticket": ticket.key, "size": stream.size_at_open, "ttl": self._tickets.ttl}
 
-    @path_method()
+    @remote_method()
     def edit_file(self, path: str, old: str, new: str) -> None:
-        """Replace exactly one occurrence of ``old`` with ``new``."""
+        """Replace exactly one occurrence of ``old`` with ``new``, as ``sed -i`` does.
+
+        The edited file is written next to the original with its mode, then
+        renamed over it. Readers with the file open keep the old contents
+        (and get ``FileChangedError`` on their next read); writers with it
+        open are writing to the old file.
+        """
         self._guard.check("edit_file", path=path)
-        raise NotImplementedError
+        target = self._policy.resolve(path, write=True)
+        old_b = old.encode()
+        if not old_b:
+            raise ValueError("old must not be empty")
+        data = target.read_bytes()
+        if (count := data.count(old_b)) != 1:
+            raise ValueError(f"{path}: old matches {count} times, not exactly once")
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                os.fchmod(f.fileno(), S_IMODE(target.stat().st_mode))
+                f.write(data.replace(old_b, new.encode(), 1))
+            os.replace(tmp, target)
+        except BaseException:
+            os.unlink(tmp)
+            raise
 
-    @path_method()
+    @remote_method()
+    def chmod(self, path: str, mode: int) -> None:
+        """chmod: set the permission bits (at most ``0o7777``). Symlinks can't be chmodded, as on Linux."""
+        self._guard.check("chmod", path=path, mode=mode)
+        if not 0 <= mode <= 0o7777:
+            raise ValueError("mode must be permission bits, 0o7777 at most")
+        os.chmod(self._policy.resolve(path, write=True), mode)
+
+    @remote_method()
+    def rename(self, path: str, to: str) -> None:
+        """rename(2): move ``path`` to ``to``, replacing a file there (or an empty directory, for a directory).
+
+        Atomic, so writing a temp file and renaming it over the original is
+        the safe rewrite, as on Unix. Across mounts on the server it fails
+        with EXDEV, as rename(2) does: there's no copy-and-delete fallback. A
+        symlink is moved, not followed. A directory holding read-only paths
+        can't be moved, since that would change their paths.
+        """
+        self._guard.check("rename", path=path, to=to)
+        source = self._policy.resolve(path, write=True, nofollow=True)
+        dest = self._policy.resolve(to, write=True, nofollow=True, is_dir=source.is_dir() and not source.is_symlink())
+        if self._policy.root in (source, dest):
+            raise PolicyError("can't rename the workspace root")
+        if S_ISDIR(source.lstat().st_mode):
+            self._check_tree_writable(source)
+        os.rename(source, dest)
+
+    def _check_tree_writable(self, top: Path) -> None:
+        for p, st in _entries_below(top):
+            if not self._policy.is_writable(p, S_ISDIR(st.st_mode)):
+                raise PolicyError(f"{p.relative_to(self._policy.root).as_posix()!r} is read-only")
+
+    @remote_method()
     def mkdir(self, path: str, parents: bool = False) -> None:
+        """mkdir, or ``mkdir -p`` with ``parents``: create missing parents, and don't fail if it exists."""
         self._guard.check("mkdir", path=path, parents=parents)
-        raise NotImplementedError
+        self._policy.resolve(path, write=True, is_dir=True).mkdir(parents=parents, exist_ok=parents)
 
-    @path_method()
+    @remote_method()
     def delete(self, path: str, recursive: bool = False) -> None:
+        """unlink a file or symlink, rmdir an empty directory, or with ``recursive`` remove a directory tree (``rm -r``).
+
+        A tree that holds excluded or read-only paths is refused before
+        anything is removed: the caller can't see the excluded ones, so it
+        can't know what it would destroy.
+        """
         self._guard.check("delete", path=path, recursive=recursive)
-        raise NotImplementedError
+        target = self._policy.resolve(path, write=True, nofollow=True)
+        if target == self._policy.root:
+            raise PolicyError("can't delete the workspace root")
+        if not S_ISDIR(target.lstat().st_mode):
+            target.unlink()
+        elif not recursive:
+            target.rmdir()
+        else:
+            if not all(self._policy.is_visible(p, S_ISDIR(st.st_mode)) for p, st in _entries_below(target)):
+                raise PolicyError(f"{path!r} holds paths that aren't exposed")
+            self._check_tree_writable(target)
+            shutil.rmtree(target)
+
+
+def _type(mode: int) -> str:
+    if S_ISREG(mode):
+        return "file"
+    if S_ISDIR(mode):
+        return "dir"
+    return "symlink" if S_ISLNK(mode) else "other"
+
+
+def _stat(st: os.stat_result) -> dict:
+    return {"type": _type(st.st_mode), "size": st.st_size, "mtime": st.st_mtime, "mode": S_IMODE(st.st_mode)}
+
+
+def _entries(policy: PathPolicy, directory: Path) -> list[tuple[Path, os.stat_result]]:
+    """The exposed entries of ``directory``, by name, with their lstat."""
+    with os.scandir(directory) as it:
+        found = sorted(((Path(e.path), e.stat(follow_symlinks=False)) for e in it), key=lambda e: e[0].name)
+    return [(p, st) for p, st in found if policy.is_visible(p, S_ISDIR(st.st_mode))]
+
+
+def _walk(policy: PathPolicy, top: Path, depth: int | None = None) -> Iterator[tuple[Path, os.stat_result]]:
+    """Exposed paths under ``top``, depth first, at most ``depth`` levels down. Doesn't follow
+    symlinks or enter excluded directories, and skips directories it can't read, like find."""
+    for p, st in _entries(policy, top):
+        yield p, st
+        if S_ISDIR(st.st_mode) and depth != 1:
+            try:
+                yield from _walk(policy, p, None if depth is None else depth - 1)
+            except PermissionError:
+                pass
+
+
+def _entries_below(top: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Every path under ``top``, excluded ones included, without following symlinks."""
+    for dirpath, dirnames, filenames in os.walk(top):
+        for name in dirnames + filenames:
+            p = Path(dirpath, name)
+            yield p, p.lstat()
 
 
 def _int_param(params, name: str, default: int | None = None) -> int | None:
@@ -475,11 +619,12 @@ class FileWriteStream:
     is revoked by the registry, which closes the file.
     """
 
-    def __init__(self, path: Path, truncate: bool):
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    def __init__(self, path: Path, truncate: bool, exclusive: bool = False):
+        flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        create = os.O_CREAT | (os.O_EXCL if exclusive else 0) | (os.O_TRUNC if truncate else 0)
+        self._fd = os.open(path, flags | create, 0o666)
         # Two descriptors: on Linux pwrite ignores its offset on an O_APPEND one.
-        self._fd = os.open(path, flags | (os.O_TRUNC if truncate else 0), 0o666)
-        self._append_fd = os.open(path, flags | os.O_APPEND, 0o666)
+        self._append_fd = os.open(path, flags | os.O_APPEND)
         self.size_at_open = os.fstat(self._fd).st_size
         self.ticket = None
         self._lock = threading.Lock()

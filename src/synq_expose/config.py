@@ -46,7 +46,6 @@ class ExposeConfig:
     allow_execute: bool = False
     exclude: tuple[str, ...] = DEFAULT_EXCLUDES
     readonly_paths: tuple[str, ...] = ()
-    gitignore: bool = True
     exec: ExecConfig = field(default_factory=ExecConfig)
     confirm: bool = False
     audit_log: Path | None = None
