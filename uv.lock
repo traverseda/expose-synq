@@ -286,7 +286,7 @@ requires-dist = [
     { name = "mfusepy", specifier = ">=3.1.1" },
     { name = "pathspec", specifier = ">=0.12.1" },
     { name = "rich", specifier = ">=14.3.3" },
-    { name = "spirisynq", specifier = ">=0.3.0" },
+    { name = "spirisynq", specifier = ">=0.4.0" },
     { name = "typer", specifier = ">=0.24.1" },
 ]
 
@@ -508,7 +508,7 @@ wheels = [
 
 [[package]]
 name = "spirisynq"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -520,9 +520,9 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/95/9338a139631f7cd987024aedf3d0984f2c84788924f4bdcf1ff81d1bd9a3/spirisynq-0.3.0.tar.gz", hash = "sha256:3b5136490209081dcc8e9637522b55243aa3f06f1d777a6bf22cbf765d2af25d", size = 76972, upload-time = "2026-10-04T16:34:06.08Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/fe/bbbbc34434690aaddbbafb5bc3c6117e8a0de551c19c72a5f5870ae9d8c4/spirisynq-0.4.0.tar.gz", hash = "sha256:a22f078809660b702432bcc8aaa1e9707d29b7a04acb50766f72976abf5efb84", size = 77539, upload-time = "2026-10-17T11:54:02.104Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/c6/9ad6ed3f0331b2f6589e02e15660287b9fade71f9d6637b2e9bb2287a558/spirisynq-0.3.0-py3-none-any.whl", hash = "sha256:826395e48538005ceb35434cd3d780a159cf9ed7da2bbead6ce9e2edf70769f4", size = 49757, upload-time = "2026-10-04T16:34:04.716Z" },
+    { url = "https://files.pythonhosted.org/packages/23/76/e5706d829deb86b780ba6afa026e5fa0b15220cea18419112ee4ce64fd43/spirisynq-0.4.0-py3-none-any.whl", hash = "sha256:db59ea4f582abd7e2e8c1d8a33274e392fba8fa5e4227d2cebcc98f32d18d86c", size = 50059, upload-time = "2026-10-17T11:54:00.639Z" },
 ]
 
 [[package]]

@@ -159,7 +159,7 @@ Each FUSE call is the RPC of the same name, and an open file is a ticket: a read
 - **On a terminal** (stdin and stdout both are, or `-t`): the command gets a pty the size of yours, and your terminal goes raw. Every keystroke goes to the remote, Ctrl-C included, and resizing your terminal resizes the remote's.
 - **Otherwise** (or `-T`): stdin is forwarded until EOF (`-n` to not), stdout and stderr come back separately, and Ctrl-C sends SIGINT; a second one gives up.
 
-Both are the same process ticket, through `client.Process`. Until SpiriSynq escapes RPC arguments, a `;` anywhere in the command breaks the call: write `sh -c` scripts with newlines instead.
+Both are the same process ticket, through `client.Process`.
 
 ## File commands
 

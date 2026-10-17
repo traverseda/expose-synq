@@ -65,7 +65,6 @@ def test_string_command_uses_shell(sh):
     assert p.wait(10) == 3
 
 
-@pytest.mark.xfail(reason="SpiriSynq doesn't escape ';' in RPC arguments (known upstream)", strict=True)
 def test_semicolon_in_command(sh):
     assert output(spawn(sh, "echo a; echo b")) == b"a\nb\n"
 

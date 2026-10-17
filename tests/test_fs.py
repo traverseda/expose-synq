@@ -1141,8 +1141,7 @@ def test_rename_refuses_a_tree_holding_readonly_paths(share):
 
 @pytest.mark.parametrize("name", [
     "a*b?c$d#e=f&g h",
-    pytest.param("a;b", marks=pytest.mark.xfail(
-        strict=True, reason="SpiriSynq passes RPC arguments as selector parameters without escaping ';'")),
+    "a;b",
 ])
 def test_names_with_odd_characters(rw, name):
     path = f"src/{name}"
