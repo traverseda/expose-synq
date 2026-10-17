@@ -1,0 +1,31 @@
+# Publishing a GitHub release builds the package and uploads it to PyPI with
+# trusted publishing (no token): PyPI trusts this workflow, in the "pypi"
+# environment of traverseda/expose-synq. The release's tag must be v<version>.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing
+      contents: write   # attach the build to the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag matches version
+        run: |
+          version=$(uv version --short)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "release tag ${GITHUB_REF_NAME} doesn't match pyproject version v${version}" >&2
+            exit 1
+          fi
+      - run: uv build
+      - run: uv publish
+      - run: gh release upload "${GITHUB_REF_NAME}" dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}

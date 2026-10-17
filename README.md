@@ -271,3 +271,7 @@ Layout (`src/synq_expose/`):
 - `sandbox.py`: bubblewrap argv
 - `client.py`: the agent side of the ticket streams
 - `testing.py`: the loopback test network
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -1,8 +1,10 @@
 [project]
-name = "synq-expose"
+name = "expose-synq"
 version = "0.1.0"
-description = "Expose a local workspace (files, sandboxed exec, port forwards) to remote agents over SpiriSynq"
+description = "Expose a local workspace (files, sandboxed exec) to remote agents over SpiriSynq"
 readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "SpiriSynq>=0.3.0",
@@ -15,6 +17,9 @@ dependencies = [
     "cryptography>=50.0.2",
 ]
 
+[project.urls]
+Repository = "https://github.com/traverseda/expose-synq"
+
 [project.scripts]
 expose-synq = "synq_expose.cli:app"
 
@@ -26,6 +31,9 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "synq_expose"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
