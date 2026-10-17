@@ -86,7 +86,8 @@ class Share:
 
     @property
     def topic(self) -> str:
-        return self.objects[0].synq_absolute_path
+        from synq_expose.workspace import share_topic
+        return share_topic(self.objects)
 
     @property
     def workspace(self) -> Path:

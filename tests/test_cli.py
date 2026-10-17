@@ -22,3 +22,10 @@ def test_share_is_a_subcommand():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "share" in result.output
+
+
+def test_only_share_enrolls_with_a_server(tmp_path):
+    result = runner.invoke(app, ["mount", "boxa/expose/x", str(tmp_path), "-c", "hermes.example.com"])
+    assert result.exit_code == 1
+    assert "only share enrolls" in result.output
+

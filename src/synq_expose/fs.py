@@ -393,7 +393,117 @@ class _Pacer:
             time.sleep(min(wait, 0.1))
 
 
-class FileReadStream:
+class ByteStream:
+    """The ``read`` and ``stream`` routes over a byte source: an open file
+    (``FileReadStream``) or a process's output (``shell.OutputStream``).
+
+    Subclasses give ``_chunks``. Its items are ``(offset, bytes)``, or
+    ``(offset, None)`` when there's nothing to send yet and the stream should
+    say it's still alive: that's published as an ``at=<offset>`` sample.
+    Routes are served under ``prefix``, the ticket key unless set otherwise.
+    """
+
+    name = "stream"
+
+    def __init__(self, zenoh_session: zenoh.Session | None = None):
+        self.ticket = None
+        self.prefix: str | None = None
+        self._session = zenoh_session
+        self._lock = threading.Lock()
+        self._stopped: set[str] = set()
+        self._pacers: dict[str, _Pacer] = {}
+        self._closed = False
+
+    def _chunks(self, start: int, end: int | None, chunk: int | Callable[[], int], readahead: str = "auto",
+                stopped=lambda: False) -> Iterator[tuple[int, bytes | None]]:
+        raise NotImplementedError
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise ValueError(f"{self.name} is closed")
+
+    def read(self, query: zenoh.Query) -> None:
+        self._check_open()
+        replied = False
+        for _, data in self._chunks(*_range(query.parameters)):
+            query.reply(query.key_expr, data, encoding=zenoh.Encoding.ZENOH_BYTES)
+            replied = True
+        if not replied:
+            query.reply(query.key_expr, b"", encoding=zenoh.Encoding.ZENOH_BYTES)
+
+    def stream(self, query: zenoh.Query) -> None:
+        params = query.parameters
+        stream_id = params.get("id") or ""
+        if not STREAM_ID.fullmatch(stream_id):
+            raise ValueError("stream needs an id of 1-64 letters, digits, '-' or '_'")
+        if "stop" in params:
+            with self._lock:
+                self._stopped.add(stream_id)
+            _json(query, {})
+            return
+        if "rate" in params:
+            with self._lock:
+                pacer = self._pacers.get(stream_id)
+            if pacer is not None:
+                pacer.set(_int_param(params, "max_rate", 0))
+            _json(query, {})
+            return
+        self._check_open()
+        if self._session is None or self.ticket is None:
+            raise RuntimeError("streaming isn't available on this ticket")
+        start, end, chunk, readahead = _range(params)
+        pacer = _Pacer(_int_param(params, "max_rate", 0), lambda: self._closed or stream_id in self._stopped)
+        with self._lock:
+            self._pacers[stream_id] = pacer
+        publisher = self._session.declare_publisher(
+            f"{self.prefix or self.ticket.key}/data/{stream_id}",
+            congestion_control=zenoh.CongestionControl.BLOCK,
+            reliability=zenoh.Reliability.RELIABLE,
+        )
+        # The query is answered once the stream is queued; the stream runs
+        # on its own thread, so it isn't bound by the query or a ticket worker.
+        threading.Thread(target=self._publish, args=(publisher, stream_id, start, end, chunk, readahead, pacer),
+                         name=f"stream-{stream_id}", daemon=True).start()
+        _json(query, {})
+
+    def _publish(self, publisher, stream_id: str, start: int, end: int | None, chunk: int, readahead: str,
+                 pace: _Pacer) -> None:
+        stopped = lambda: self._closed or stream_id in self._stopped
+        offset = start
+        try:
+            for offset, data in self._chunks(start, end, lambda: pace.chunk(chunk), readahead, stopped):
+                if data is None:
+                    publisher.put(b"", attachment=f"at={offset}")
+                    continue
+                publisher.put(data, encoding=zenoh.Encoding.ZENOH_BYTES, attachment=f"o={offset}")
+                offset += len(data)
+                pace(len(data))
+            if not stopped():
+                publisher.put(b"", attachment=f"end={offset}")
+        except Exception as e:
+            logger.warning(f"stream {stream_id} of {self.name} failed: {e}")
+            try:
+                publisher.put(b"", attachment=f"err={type(e).__name__}: {e}")
+            except Exception:
+                pass
+        finally:
+            publisher.undeclare()
+            with self._lock:
+                self._stopped.discard(stream_id)
+                self._pacers.pop(stream_id, None)
+
+    def close_route(self, query: zenoh.Query) -> None:
+        self.close()
+        if self.ticket is not None:
+            self.ticket.retire()
+        _json(query, {})
+
+    def close(self) -> None:
+        """Stop every running stream, at its next chunk. Also called when the ticket is revoked."""
+        self._closed = True
+
+
+class FileReadStream(ByteStream):
     """Read ticket: an open file. Routes under the ticket key::
 
         get <t>/read?start=S[;end=E][;chunk=C][;readahead=R]  → raw byte replies, C bytes each, then the
@@ -436,23 +546,15 @@ class FileReadStream:
     """
 
     def __init__(self, path: Path, st: os.stat_result, zenoh_session: zenoh.Session | None = None):
+        super().__init__(zenoh_session)
         self.path = path
+        self.name = path.name
         self.inode = st.st_ino
         self._largest = st.st_size
         """The largest size seen. Below it, the file was truncated."""
-        self.ticket = None
-        self._session = zenoh_session
-        self._lock = threading.Lock()
-        self._stopped: set[str] = set()
-        self._pacers: dict[str, _Pacer] = {}
-        self._closed = False
 
     def routes(self) -> dict:
         return {"read": self.read, "stream": self.stream, "close": self.close_route}
-
-    def _check_open(self) -> None:
-        if self._closed:
-            raise ValueError("file is closed")
 
     def _check(self, st: os.stat_result) -> None:
         if st.st_ino != self.inode:
@@ -508,84 +610,6 @@ class FileReadStream:
             self._check(os.stat(self.path, follow_symlinks=False))
         finally:
             os.close(fd)
-
-    def read(self, query: zenoh.Query) -> None:
-        self._check_open()
-        replied = False
-        for _, data in self._chunks(*_range(query.parameters)):
-            query.reply(query.key_expr, data, encoding=zenoh.Encoding.ZENOH_BYTES)
-            replied = True
-        if not replied:
-            query.reply(query.key_expr, b"", encoding=zenoh.Encoding.ZENOH_BYTES)
-
-    def stream(self, query: zenoh.Query) -> None:
-        params = query.parameters
-        stream_id = params.get("id") or ""
-        if not STREAM_ID.fullmatch(stream_id):
-            raise ValueError("stream needs an id of 1-64 letters, digits, '-' or '_'")
-        if "stop" in params:
-            with self._lock:
-                self._stopped.add(stream_id)
-            _json(query, {})
-            return
-        if "rate" in params:
-            with self._lock:
-                pacer = self._pacers.get(stream_id)
-            if pacer is not None:
-                pacer.set(_int_param(params, "max_rate", 0))
-            _json(query, {})
-            return
-        self._check_open()
-        if self._session is None or self.ticket is None:
-            raise RuntimeError("streaming isn't available on this ticket")
-        start, end, chunk, readahead = _range(params)
-        pacer = _Pacer(_int_param(params, "max_rate", 0), lambda: self._closed or stream_id in self._stopped)
-        with self._lock:
-            self._pacers[stream_id] = pacer
-        publisher = self._session.declare_publisher(
-            f"{self.ticket.key}/data/{stream_id}",
-            congestion_control=zenoh.CongestionControl.BLOCK,
-            reliability=zenoh.Reliability.RELIABLE,
-        )
-        # The query is answered once the stream is queued; the stream runs
-        # on its own thread, so it isn't bound by the query or a ticket worker.
-        threading.Thread(target=self._publish, args=(publisher, stream_id, start, end, chunk, readahead, pacer),
-                         name=f"stream-{stream_id}", daemon=True).start()
-        _json(query, {})
-
-    def _publish(self, publisher, stream_id: str, start: int, end: int | None, chunk: int, readahead: str,
-                 pace: _Pacer) -> None:
-        stopped = lambda: self._closed or stream_id in self._stopped
-        offset = start
-        try:
-            for offset, data in self._chunks(start, end, lambda: pace.chunk(chunk), readahead, stopped):
-                publisher.put(data, encoding=zenoh.Encoding.ZENOH_BYTES, attachment=f"o={offset}")
-                offset += len(data)
-                pace(len(data))
-            if not stopped():
-                publisher.put(b"", attachment=f"end={offset}")
-        except Exception as e:
-            logger.warning(f"stream {stream_id} of {self.path.name} failed: {e}")
-            try:
-                publisher.put(b"", attachment=f"err={type(e).__name__}: {e}")
-            except Exception:
-                pass
-        finally:
-            publisher.undeclare()
-            with self._lock:
-                self._stopped.discard(stream_id)
-                self._pacers.pop(stream_id, None)
-
-    def close_route(self, query: zenoh.Query) -> None:
-        self.close()
-        if self.ticket is not None:
-            self.ticket.retire()
-        _json(query, {})
-
-    def close(self) -> None:
-        """Stop every running stream, at its next chunk. Also called when the ticket is revoked."""
-        self._closed = True
-
 
 class FileChangedError(RuntimeError):
     pass

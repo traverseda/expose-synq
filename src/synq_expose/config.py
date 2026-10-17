@@ -36,6 +36,8 @@ class ExecConfig:
     shell: str = "/bin/sh"
     timeout: float = 600.0
     max_procs: int = 4
+    output_cap: int = 64 << 20
+    """Bytes of output kept per process stream; older output is dropped."""
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,9 @@ class ExposeConfig:
 # Layers, later wins:
 #   1. LOCKED_DOWN: no listening, connecting or scouting
 #      (+ PUBLIC with --public: zenoh's normal scouting)
-#   2. the config file (--zenoh-config / EXPOSE_SYNQ_ZENOH_CONFIG / ZENOH_CONFIG)
+#   2. the config file (--zenoh-config / EXPOSE_SYNQ_ZENOH_CONFIG / ZENOH_CONFIG,
+#      else ~/.config/expose-synq/zenoh.json5 if `expose-synq setup` wrote one),
+#      then the layers servers handed us on enrollment (synq_expose.enroll)
 #   3. EXPOSE_SYNQ_ZENOH__<SECTION>__<KEY>... environment variables
 #   4. --zenoh KEY=VALUE flags
 #   5. --connect / --listen
@@ -87,9 +91,18 @@ PUBLIC: dict[str, Any] = {
 
 ENV_PREFIX = "EXPOSE_SYNQ_ZENOH__"
 
+TOPIC_ENV = "EXPOSE_SYNQ_TOPIC"
+"""The share client commands use when not given one: `run`'s --topic, and `file` paths without TOPIC:."""
+
 
 class ZenohConfigError(ValueError):
     pass
+
+
+def default_zenoh_config_path(environ: Mapping[str, str] = os.environ) -> Path:
+    """Where ``expose-synq setup`` writes, and the config file used when none is given."""
+    base = environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "expose-synq" / "zenoh.json5"
 
 
 def parse_value(raw: str) -> Any:
@@ -142,6 +155,7 @@ def build_zenoh_config(
     environ: Mapping[str, str] = os.environ,
     *,
     public: bool = False,
+    enrolled: list[Mapping[str, Any]] = (),
 ) -> zenoh.Config:
     layers = [LOCKED_DOWN]
     if public:
@@ -151,6 +165,7 @@ def build_zenoh_config(
             layers.append(json5.loads(config_file.read_text()))
         except ValueError as e:
             raise ZenohConfigError(f"{config_file}: {e}") from e
+    layers += enrolled
     layers.append(env_layer(environ))
     layers += [override_layer(spec) for spec in overrides]
     if connect:

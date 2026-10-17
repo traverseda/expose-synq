@@ -13,7 +13,7 @@ from synq_expose import client
 from synq_expose.client import TicketError
 from synq_expose.fs import CHUNK_SIZE, FsRead, FsWrite
 from synq_expose.testing import wait_for
-from synq_expose.workspace import Workspace
+from synq_expose.workspace import DiscoveryError, discover
 
 
 def current_umask() -> int:
@@ -61,11 +61,26 @@ def test_read_only_share_has_no_write_object(ro):
     assert not ro.exists("/shell")
 
 
-def test_workspace_advertises_grants(rw):
-    ws = rw.mirror(Workspace)
-    assert ws.root_name == "ws"
-    assert ws.can_write and not ws.can_execute
-    assert rw.exists("/fs/write")
+def test_discover_finds_what_is_granted(rw):
+    granted = discover(rw.network.client, rw.topic)
+    assert granted["FsRead"] == f"{rw.topic}/fs/read"
+    assert granted["FsWrite"] == f"{rw.topic}/fs/write"
+    assert "Shell" not in granted
+
+
+def test_shell_says_whether_it_is_sandboxed(share):
+    from synq_expose.shell import Shell
+    s = share(allow_execute=True)
+    assert "Shell" in discover(s.network.client, s.topic)
+    assert s.mirror(Shell, "/shell").sandboxed is False      # conftest shares run unsandboxed
+
+
+def test_discover_needs_a_share_at_the_topic(share):
+    s = share()
+    with pytest.raises(DiscoveryError, match="no share"):
+        discover(s.network.client, f"{s.topic}-nope", timeout=0.2)
+    with pytest.raises(DiscoveryError, match="no share at .* there's one at"):
+        discover(s.network.client, s.topic.rsplit("/", 1)[0], timeout=0.2)
 
 
 # ── RPCs ────────────────────────────────────────────────────────────────────

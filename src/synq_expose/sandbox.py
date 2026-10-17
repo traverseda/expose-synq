@@ -36,6 +36,10 @@ def wrap_command(
     * ``--die-with-parent``, ``--new-session``, ``--clearenv`` plus ``config.pass_env``
     * each path in ``hidden`` masked with an empty tmpfs (dirs) or /dev/null (files)
     * ``config.sandbox.bind_ro`` / ``bind`` added as extra mounts
+
+    On a pty, ``--new-session`` would detach the command from its terminal
+    (no Ctrl-C, no SIGWINCH). The pty is the command's own, so the TIOCSTI
+    escape it guards against has nowhere to go: leave it out there.
     """
     if not config.sandbox.enabled:
         return argv

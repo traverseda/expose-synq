@@ -11,6 +11,12 @@ stub = pytest.mark.xfail(reason="not implemented yet", strict=True)
 """For behaviour that's specified but still a stub. strict: an implemented one fails until unmarked."""
 
 
+@pytest.fixture(autouse=True)
+def no_user_config(tmp_path_factory, monkeypatch):
+    """Keep a zenoh.json5 written by `expose-synq setup` out of the tests."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+
+
 @pytest.fixture(scope="session")
 def network():
     net = Network.open()

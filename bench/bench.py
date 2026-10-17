@@ -242,11 +242,24 @@ def bench_spawn(net: Network, share, n: int) -> list[Result]:
     shell = share.mirror(Shell, "/shell")
 
     def run_true():
-        t = shell.spawn(["true"])
-        while client.call_json(net.z, f"{t}/status")["running"]:
-            time.sleep(0.001)
-        client.call(net.z, f"{t}/discard")
-    return [guarded("spawn `true` to exit (unsandboxed)", lambda: latency("spawn `true` to exit (unsandboxed)", run_true, n))]
+        with client.Process(net.z, shell.spawn(["true"]), heartbeat=None) as p:
+            p.wait(10)
+
+    def keystrokes():
+        # One keystroke to its echo on a pty: what typing in a remote shell feels like.
+        p = client.Process(net.z, shell.spawn(["cat"], pty=True), heartbeat=None)
+        out = p.output()
+
+        def keystroke():
+            p.write(b"x")
+            assert next(out) == b"x"
+        try:
+            return latency("pty keystroke to echo (unsandboxed)", keystroke, n)
+        finally:
+            out.close()
+            p.close()
+    return [guarded("spawn `true` to exit (unsandboxed)", lambda: latency("spawn `true` to exit (unsandboxed)", run_true, n)),
+            guarded("pty keystroke to echo (unsandboxed)", keystrokes)]
 
 
 def main(argv: list[str] | None = None) -> list[Result]:

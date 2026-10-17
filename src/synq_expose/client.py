@@ -163,6 +163,12 @@ def stream(z: zenoh.Session, ticket: str, start: int = 0, end: int | None = None
     granularity of a stream. ``retries`` counts failures in a row without
     progress. An ``err`` sample (the file changed, say) raises straight away.
 
+    ``ticket`` is the key the ``stream`` route is under: a read ticket, or a
+    process's ``<t>/stdout``. On process output, a stream with no ``end``
+    runs until the process closes the stream, and while it's quiet the
+    server sends ``at=`` samples so it doesn't look lost. Heartbeating
+    ``<t>/stdout`` does nothing; ``Process`` heartbeats the ticket itself.
+
     There's no backpressure from the caller. zenoh's backpressure is per
     link, not per stream: a stream pausing it would stall everything else on
     the session. So up to ``buffer`` bytes are queued for the caller, and
@@ -269,6 +275,11 @@ def _stream(z, ticket, start, end, chunk, timeout, retries, backoff, buffer, rea
                 kind, value = _attachment(sample)
                 if kind == "err":
                     raise TicketError(value)
+                if kind == "at":
+                    # Live output with nothing new: the stream is still there.
+                    if int(value) > position:
+                        raise _Gap(f"gap in stream of {ticket}: {position} to {value}")
+                    continue
                 if kind == "end":
                     if int(value) == position:
                         finished = True
@@ -524,3 +535,83 @@ def call(z: zenoh.Session, selector: str, payload: bytes | None = None, timeout:
 
 def call_json(z: zenoh.Session, selector: str, payload: bytes | None = None, timeout: float = 30.0):
     return json.loads(call(z, selector, payload, timeout))
+
+
+class Process:
+    """A process ticket, from ``Shell.spawn``: its output, stdin and status. Heartbeats the ticket while open.
+
+    The same calls work for a plain command and an interactive one on a pty.
+    ``close`` ends the process; a ``Process`` dropped without it stops
+    heartbeating, and the server ends the process once the ticket idles out.
+    """
+
+    def __init__(self, z: zenoh.Session, spawned: dict | str, *, timeout: float = 10.0, retries: int = 5,
+                 heartbeat: float | str | None = HEARTBEAT):
+        self.z = z
+        self.ticket = spawned["ticket"] if isinstance(spawned, dict) else spawned
+        self.pty = spawned.get("pty", False) if isinstance(spawned, dict) else False
+        self.timeout = timeout
+        self.retries = retries
+        self._seq = 0
+        self._stdin_lock = threading.Lock()
+        self._heartbeat = Heartbeat(z, self.ticket, heartbeat)
+
+    def _send(self, route: str, data: bytes | None = None) -> bytes:
+        return _request(self.z, f"{self.ticket}/{route}", data, self.timeout, self.retries)
+
+    def output(self, name: str = "stdout", start: int = 0, end: int | None = None, **kwargs) -> Iterator[bytes]:
+        """Stream ``name`` (stdout or stderr) from ``start``, until the process closes it or ``end``."""
+        return stream(self.z, f"{self.ticket}/{name}", start, end, heartbeat=None, **kwargs)
+
+    def read(self, name: str = "stdout", start: int = 0, wait: float = 0) -> bytes:
+        """What's in ``name`` from ``start`` now, waiting up to ``wait`` seconds for something, like read(2)."""
+        selector = f"{self.ticket}/{name}/read?start={start};wait={wait}"
+        return b"".join(s.payload.to_bytes() for s in _replies(self.z, selector, wait + self.timeout))
+
+    def write(self, data: bytes) -> None:
+        """Write to stdin, in order, waiting for the ack. On a pty this is typing: ``b"\\x03"`` is Ctrl-C."""
+        with self._stdin_lock:
+            self._send(f"stdin/append?seq={self._seq}", bytes(data))
+            self._seq += 1
+
+    def close_stdin(self) -> None:
+        self._send("stdin/close")
+
+    def resize(self, rows: int, cols: int) -> None:
+        self._send(f"resize?rows={rows};cols={cols}")
+
+    def status(self, wait: float = 0) -> dict:
+        return json.loads(_request(self.z, f"{self.ticket}/status" + (f"?wait={wait}" if wait else ""), None,
+                                   self.timeout + wait, self.retries))
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Block until the process exits; its exit code (negative for a signal)."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            left = 25.0 if deadline is None else min(25.0, deadline - time.monotonic())
+            if left <= 0:
+                raise TimeoutError("process still running")
+            status = self.status(wait=left)
+            if not status["running"]:
+                return status["exit_code"]
+
+    def kill(self, sig: str = "SIGTERM") -> None:
+        self._send(f"kill?signal={sig}")
+
+    def close(self) -> None:
+        """End the process (if it's still running) and drop its output. Repeating it is harmless."""
+        try:
+            self._send("close")
+        finally:
+            self._heartbeat.stop()
+
+    def __del__(self) -> None:
+        heartbeat = getattr(self, "_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.stop()
+
+    def __enter__(self) -> "Process":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
