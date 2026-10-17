@@ -32,7 +32,7 @@ def wrap_command(
     * ``/usr``, ``/bin``, ``/lib*``, minimal ``/etc``, and on NixOS ``/nix/store``
       and ``/run/current-system`` bound read-only
     * private ``/tmp``, ``/proc``, ``/dev``
-    * ``--unshare-all`` (``--share-net`` only if ``config.sandbox.allow_network``)
+    * ``--unshare-all``, plus ``--share-net`` unless ``config.sandbox.allow_network`` is off
     * ``--die-with-parent``, ``--new-session``, ``--clearenv`` plus ``config.pass_env``
     * each path in ``hidden`` masked with an empty tmpfs (dirs) or /dev/null (files)
     * ``config.sandbox.bind_ro`` / ``bind`` added as extra mounts

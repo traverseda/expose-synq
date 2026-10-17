@@ -359,8 +359,8 @@ def test_sandbox_hides_excluded(share):
 
 @needs_bwrap
 @stub
-def test_sandbox_has_no_network(share):
-    s = share(allow_execute=True, sandbox=True)
+def test_sandbox_without_network(share):
+    s = share(allow_execute=True, exec=ExecConfig(sandbox=SandboxConfig(allow_network=False)))
     assert output(spawn(s, ["cat", "/sys/class/net/lo/operstate"])) != b""
     assert b"eth" not in output(spawn(s, ["ls", "/sys/class/net"]))
 

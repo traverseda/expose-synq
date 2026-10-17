@@ -168,9 +168,9 @@ def share(
         True, "--sandbox/--no-sandbox",
         help="Run commands inside bubblewrap. --no-sandbox runs them as you, unconfined.",
     ),
-    allow_network: bool = typer.Option(
-        False, "--allow-network",
-        help="Give sandboxed commands network access (default: --unshare-net).",
+    network: bool = typer.Option(
+        True, "--network/--no-network",
+        help="Give sandboxed commands network access. --no-network unshares it.",
     ),
 
     # ── Visibility ──────────────────────────────────────────────────────
@@ -234,10 +234,10 @@ def share(
     if not allow_execute:
         if not sandbox:
             raise fail("--no-sandbox only makes sense with --allow-execute")
-        if allow_network or bind or bind_ro or pass_env:
+        if not network or bind or bind_ro or pass_env:
             raise fail("sandbox/exec options require --allow-execute")
-    if not sandbox and (allow_network or bind or bind_ro):
-        raise fail("--allow-network/--bind/--bind-ro configure the sandbox; drop them or drop --no-sandbox")
+    if not sandbox and (not network or bind or bind_ro):
+        raise fail("--no-network/--bind/--bind-ro configure the sandbox; drop them or drop --no-sandbox")
     if topic is None:
         try:
             topic = default_topic(workspace)
@@ -257,7 +257,7 @@ def share(
         exec=ExecConfig(
             sandbox=SandboxConfig(
                 enabled=sandbox,
-                allow_network=allow_network,
+                allow_network=network,
                 bind_ro=tuple(bind_ro),
                 bind=tuple(bind),
             ),

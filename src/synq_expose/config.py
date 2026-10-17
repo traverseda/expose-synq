@@ -24,7 +24,7 @@ DEFAULT_EXCLUDES = (
 @dataclass(frozen=True)
 class SandboxConfig:
     enabled: bool = True
-    allow_network: bool = False
+    allow_network: bool = True
     bind_ro: tuple[Path, ...] = ()
     bind: tuple[Path, ...] = ()
 

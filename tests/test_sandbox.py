@@ -26,12 +26,12 @@ def test_sandboxed_argv(tmp_path):
     argv = wrap(tmp_path)
     assert Path(argv[0]).name == "bwrap"
     assert argv[-3:] == ["--", "make", "test"]
-    assert "--unshare-all" in argv and "--share-net" not in argv
+    assert "--unshare-all" in argv and "--share-net" in argv
     assert has_run(argv, "--ro-bind", str(tmp_path), str(tmp_path))
     assert has_run(argv, "--chdir", str(tmp_path))
     assert str(tmp_path / ".env") in argv
 
 
 @stub
-def test_allow_network(tmp_path):
-    assert "--share-net" in wrap(tmp_path, allow_network=True)
+def test_no_network(tmp_path):
+    assert "--share-net" not in wrap(tmp_path, allow_network=False)
