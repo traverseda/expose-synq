@@ -5,15 +5,15 @@
 Expose a local folder to remote AI agents over [SpiriSynq](https://pypi.org/project/SpiriSynq/). The remote can read files, and optionally write files and run commands in a bubblewrap sandbox.
 
 ```bash
-expose-synq share ./ -w -x                      # read/write + sandboxed exec on <hostname>/expose/<dir>
+expose-synq share ./ -w -x                      # read/write + sandboxed exec on <hostname>/<absolute path of .>
 expose-synq share ./ -w -x --no-sandbox         # exec runs unconfined, as you
 expose-synq share ~/proj -x --confirm           # approve each write and command
 expose-synq share . -w -c tcp/relay:7447
 expose-synq share . --public                    # findable by any zenoh peer on the network
-expose-synq mount host/expose/proj ~/mnt -c tcp/host:7447   # the share as a local filesystem (FUSE)
-expose-synq run -c tcp/host:7447 --topic host/expose/proj bash   # an interactive shell in the share
-expose-synq run -c tcp/host:7447 --topic host/expose/proj make test   # or any command, with its exit status
-expose-synq file pull -c tcp/host:7447 host/expose/proj:src/app.py   # one file to stdout; see "File commands"
+expose-synq mount host/home/me/proj ~/mnt -c tcp/host:7447   # the share as a local filesystem (FUSE)
+expose-synq run -c tcp/host:7447 --topic host/home/me/proj bash   # an interactive shell in the share
+expose-synq run -c tcp/host:7447 --topic host/home/me/proj make test   # or any command, with its exit status
+expose-synq file pull -c tcp/host:7447 host/home/me/proj:src/app.py   # one file to stdout; see "File commands"
 ```
 
 Only reading is allowed unless you ask for more. Each capability is its own object, created only when granted, so what a share grants is found with SpiriSynq's discovery, by which objects are there:
@@ -22,7 +22,7 @@ Only reading is allowed unless you ask for more. Each capability is its own obje
 <topic>/fs/read         FsRead        always
 <topic>/fs/write        FsWrite       --allow-write
 <topic>/shell           Shell         --allow-execute; its sandboxed field says whether commands run in bwrap
-<root>/tickets/@<secret>              byte streams: file reads/writes, processes
+<root>/tickets/<secret>               byte streams: file reads/writes, processes
 ```
 
 The filesystem RPCs follow the Unix calls they're named after. They act on symlinks, never through them, and skip or refuse excluded paths:
@@ -44,7 +44,7 @@ FsWrite  open_write(path, truncate, exclusive=False)    write ticket; exclusive 
 
 `delete(recursive=True)` refuses a tree holding excluded or read-only paths before removing anything, since the caller can't see what it would destroy. Directory patterns match directories as in `.gitignore`, so `.git/**` makes `.git` itself read-only.
 
-File contents and process output never travel through SpiriSynq RPCs. `open_read`, `open_write` and `spawn` return a **ticket**: a few raw zenoh queryables under `<root>/tickets/@<secret>`, where `<root>` is the node's base topic. Each ticket's stream protocol is in the docstrings of `FileReadStream`, `FileWriteStream` and `Process`.
+File contents and process output never travel through SpiriSynq RPCs. `open_read`, `open_write` and `spawn` return a **ticket**: a few raw zenoh queryables under `<root>/tickets/<secret>`, where `<root>` is the node's base topic. Each ticket's stream protocol is in the docstrings of `FileReadStream`, `FileWriteStream` and `Process`.
 
 A ticket is an open handle. It lasts until `<t>/close`, or until it goes `ttl` seconds (returned by `open_read`/`open_write`) without a request. Every ticket has `<t>/heartbeat` for a client that holds one without using it. Work the server does on its own, like publishing a stream, doesn't count, so a client that disappears takes its streams with it. `client.stream` and `client.RemoteFile` heartbeat for as long as they're in use, every third of the ttl the heartbeat reply reports.
 
@@ -137,6 +137,8 @@ A process lasts as long as its ticket. When the ticket is closed, or goes `ttl` 
 @t/heartbeat               → {ttl}. Counts as use, nothing else
 ```
 
+A share's topic is the folder's absolute path under the node's base topic: `share /home/me/proj` on `host` is `host/home/me/proj`, so any number of shares on one host stay apart. `--topic` picks another one, still under the base topic. A path that can't be a key expression (a chunk with `*`, `$`, `#` or `?`, or starting with `@`), `/` and `/tickets` need `--topic`. Shares nest: `host/home/me` and `host/home/me/proj` can both be shared, and discovery at one ignores the other. Asking for a topic with no share at it lists the shares under it.
+
 Find shares with `synq topic list --type FsRead`: a share's topic is its FsRead's, without `/fs/read`.
 
 ## Mounting
@@ -164,7 +166,7 @@ Both are the same process ticket, through `client.Process`. Until SpiriSynq esca
 `expose-synq file VERB` is one small command per FsRead/FsWrite method, plus `pull` and `push` over tickets, for scripts and agents that would rather not mount. A remote path is `TOPIC:PATH`, as scp writes `host:path`. Without a `TOPIC:` the topic comes from `$EXPOSE_SYNQ_TOPIC`, so an agent's shell can set it once; write `:PATH` or `./PATH` for a path holding a colon. They take the same zenoh options as `share`.
 
 ```bash
-export EXPOSE_SYNQ_TOPIC=host/expose/proj
+export EXPOSE_SYNQ_TOPIC=host/home/me/proj
 expose-synq file ls src                  # list_dir: mode, size, mtime, name (--json for the raw entries)
 expose-synq file stat src/app.py         # stat (--json too)
 expose-synq file hash src/app.py         # hash: sha256:…  (-a for another algorithm)
@@ -182,7 +184,7 @@ Each does what its method does and no more: `push` writes in place, with no temp
 
 This prototype has **no access control**. expose-synq doesn't check who's calling, and it doesn't configure or rely on Zenoh `access_control`. Anyone who can reach the node over Zenoh can call every capability you granted, including `--allow-execute`. Only run it on networks you trust. The default config has no connectivity, while `--public` makes it reachable by every Zenoh peer on the network.
 
-Tickets (`<root>/tickets/@<secret>`) can't be found by wildcard queries or subscriptions, because Zenoh wildcards never match an `@` segment. But a ticket is a bearer secret: anyone who learns its key can use it.
+A ticket (`<root>/tickets/<secret>`) is a bearer secret: anyone who learns its key can use it. Its routes ignore any query that doesn't name them exactly, so a wildcard `get` can't read, write, close or kill anything. But the secret is an ordinary chunk, so a wildcard subscription on `<root>/**` does see stream data. It used to be a verbatim `@` chunk, which no wildcard matches, but no zenoh ACL rule can match one either, so a router confining a node to `<root>/**` blocked every ticket.
 
 Who can reach the node is zenoh's job: TLS and `transport/auth` in its config (see below). Within the workspace, `PathPolicy` keeps paths inside the root (no `..`, no symlinks along the way) and applies the excludes and read-only paths.
 

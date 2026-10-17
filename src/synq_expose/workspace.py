@@ -3,7 +3,7 @@
     <topic>/fs/read         FsRead        always
     <topic>/fs/write        FsWrite       --allow-write
     <topic>/shell           Shell         --allow-execute
-    <root>/tickets/@<secret>              byte streams returned by open_read, open_write
+    <root>/tickets/<secret>               byte streams returned by open_read, open_write
                                           and spawn (tickets.py)
 
 An object is only created for a granted capability, so an ungranted one has
@@ -23,6 +23,9 @@ from synq_expose.tickets import TicketRegistry
 
 FS_READ = "fs/read"
 """Where FsRead sits under a share's topic. It's always there, so it's what marks a share."""
+
+OBJECTS = (FS_READ, "fs/write", "shell")
+"""Every object a share can have, under its topic. Anything deeper belongs to a share nested in it."""
 
 
 @dataclass
@@ -53,11 +56,12 @@ def build_objects(config: ExposeConfig, tickets: TicketRegistry) -> list[Syncabl
     rt = Runtime(config, PathPolicy.from_config(config), Guard.from_config(config), tickets)
     topic = config.topic
 
-    objects = [start(FsRead, f"{topic}/{FS_READ}", rt)]
+    fs_read, fs_write, shell = OBJECTS
+    objects = [start(FsRead, f"{topic}/{fs_read}", rt)]
     if config.allow_write:
-        objects.append(start(FsWrite, f"{topic}/fs/write", rt))
+        objects.append(start(FsWrite, f"{topic}/{fs_write}", rt))
     if config.allow_execute:
-        objects.append(start(Shell, f"{topic}/shell", rt, max_procs=config.exec.max_procs,
+        objects.append(start(Shell, f"{topic}/{shell}", rt, max_procs=config.exec.max_procs,
                              sandboxed=config.exec.sandbox.enabled))
     return objects
 
@@ -77,23 +81,25 @@ def discover(session, topic: str, timeout: float = 10.0) -> dict[str, str]:
     SpiriSynq's discovery (``list_topics``), retried until the share's
     objects show up or ``timeout`` passes, since a fresh session takes a
     moment to learn remote declarations. One answer covers every object
-    the share has. Raises DiscoveryError if there's no share at ``topic``,
-    or more than one under it.
+    the share has. Shares nested under ``topic`` (a share of a subfolder)
+    are ignored. Raises DiscoveryError if there's no share at ``topic``,
+    naming any under it.
     """
+    own = {f"{topic}/{suffix}" for suffix in OBJECTS}
     deadline = time.monotonic() + timeout
     while True:
-        found: dict[str, list[str]] = {}
+        found: dict[str, str] = {}
+        nested: set[str] = set()
         for meta in session.list_topics(prefix=topic):
-            for cls in meta["classes"]:
-                found.setdefault(cls.removeprefix("!"), []).append(meta["topic"])
-        shares = found.get("FsRead", [])
-        if len(shares) > 1:
-            listed = ", ".join(sorted(t.removesuffix(f"/{FS_READ}") for t in shares))
-            raise DiscoveryError(f"{topic} holds more than one share: {listed}")
-        if shares:
-            if shares[0] != f"{topic}/{FS_READ}":
-                raise DiscoveryError(f"no share at {topic}; there's one at {shares[0].removesuffix(f'/{FS_READ}')}")
-            return {cls: topics[0] for cls, topics in found.items()}
+            classes = [cls.removeprefix("!") for cls in meta["classes"]]
+            if meta["topic"] in own:
+                found.update((cls, meta["topic"]) for cls in classes)
+            elif "FsRead" in classes and meta["topic"].startswith(f"{topic}/"):
+                nested.add(meta["topic"].removesuffix(f"/{FS_READ}"))
+        if "FsRead" in found:
+            return found
         if time.monotonic() >= deadline:
+            if nested:
+                raise DiscoveryError(f"no share at {topic}; shares under it: {', '.join(sorted(nested))}")
             raise DiscoveryError(f"no share at {topic}; check the topic and --connect")
         time.sleep(0.05)

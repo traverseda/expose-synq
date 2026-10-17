@@ -95,6 +95,25 @@ TOPIC_ENV = "EXPOSE_SYNQ_TOPIC"
 """The share client commands use when not given one: `run`'s --topic, and `file` paths without TOPIC:."""
 
 
+def default_topic(workspace: Path) -> str:
+    """Where ``share`` publishes ``workspace`` without --topic: its absolute path under the node's base topic.
+
+    ``/home/me/proj`` on ``azrael`` is ``azrael/home/me/proj``, so two shares
+    on one host never collide. Raises ValueError for a path that can't be a
+    key expression, or that would sit on the node's own keys.
+    """
+    chunks = workspace.parts[1:]
+    if not chunks:
+        raise ValueError("sharing / needs --topic: its default topic would be the node's base topic itself")
+    if chunks[0] == "tickets":
+        raise ValueError(f"sharing {workspace} needs --topic: its default topic is under the node's tickets")
+    for chunk in chunks:
+        if chunk.startswith("@") or set(chunk) & set("*$#?"):
+            raise ValueError(f"sharing {workspace} needs --topic: {chunk!r} can't be part of a key expression "
+                             f"(no * $ # ?, and no leading @)")
+    return "./" + "/".join(chunks)
+
+
 class ZenohConfigError(ValueError):
     pass
 

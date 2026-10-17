@@ -26,14 +26,23 @@ def echo(query):
     query.reply(query.key_expr, payload=f"hello {query.parameters.get('name')}")
 
 
-def test_ticket_is_reachable_only_by_exact_key(session):
+def test_ticket_routes_answer_under_its_key(session):
     registry = TicketRegistry(session, "node")
     ticket = registry.mint("test", {"": echo, "sub": echo})
-    assert ticket.key.startswith("node/tickets/@")
+    assert ticket.key.startswith("node/tickets/")
     assert replies(session, f"{ticket.key}?name=a") == ["hello a"]
     assert replies(session, f"{ticket.key}/sub?name=b") == ["hello b"]
-    assert replies(session, "node/tickets/**") == []
-    assert replies(session, "**") == []
+
+
+def test_wildcard_queries_reach_no_route(session):
+    registry = TicketRegistry(session, "node")
+    closed = []
+    ticket = registry.mint("test", {"": echo, "close": lambda q: closed.append(q) or q.reply(q.key_expr, "{}")})
+    for selector in ("node/**", "node/tickets/**", f"{ticket.key}/*", "**"):
+        assert replies(session, selector) == []
+    assert closed == []
+    assert replies(session, f"{ticket.key}/close") == ["{}"]
+    assert len(closed) == 1
 
 
 def test_revoke_and_done(session):

@@ -55,7 +55,7 @@ def test_shell_advertises_max_procs(share):
 
 def test_argv_command(sh):
     p = spawn(sh, ["echo", "hi"])
-    assert p.ticket.startswith("node/tickets/@")
+    assert p.ticket.startswith("node/tickets/")
     assert output(p) == b"hi\n"
     assert p.wait(10) == 0
 

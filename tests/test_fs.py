@@ -11,6 +11,7 @@ from SpiriSynq.remote_callables import RpcException
 
 from synq_expose import client
 from synq_expose.client import TicketError
+from synq_expose.config import ExposeConfig
 from synq_expose.fs import CHUNK_SIZE, FsRead, FsWrite
 from synq_expose.testing import wait_for
 from synq_expose.workspace import DiscoveryError, discover
@@ -79,8 +80,25 @@ def test_discover_needs_a_share_at_the_topic(share):
     s = share()
     with pytest.raises(DiscoveryError, match="no share"):
         discover(s.network.client, f"{s.topic}-nope", timeout=0.2)
-    with pytest.raises(DiscoveryError, match="no share at .* there's one at"):
+    with pytest.raises(DiscoveryError, match=f"no share at .* shares under it: {s.topic}$"):
         discover(s.network.client, s.topic.rsplit("/", 1)[0], timeout=0.2)
+
+
+def test_discover_ignores_shares_nested_under_the_topic(share, network, tmp_path):
+    outer = share(allow_write=True)
+    inner_ws = tmp_path / "ws" / "sub"
+    inner_ws.mkdir()
+    inner = network.share(ExposeConfig(workspace=inner_ws, topic=f"{outer.config.topic}/sub", allow_execute=True))
+    try:
+        assert inner.topic == f"{outer.topic}/sub"
+        granted = discover(network.client, inner.topic)
+        assert (granted["FsRead"], granted["Shell"]) == (f"{inner.topic}/fs/read", f"{inner.topic}/shell")
+        assert "FsWrite" not in granted
+        granted = discover(network.client, outer.topic)
+        assert (granted["FsRead"], granted["FsWrite"]) == (f"{outer.topic}/fs/read", f"{outer.topic}/fs/write")
+        assert "Shell" not in granted
+    finally:
+        inner.close()
 
 
 # ── RPCs ────────────────────────────────────────────────────────────────────
@@ -90,15 +108,14 @@ def test_hash(ro):
     assert fs.hash("src/main.py") == sha256(b"print('hi')\n")
 
 
-def test_open_read_returns_stat_and_hidden_ticket(ro):
+def test_open_read_returns_stat_and_ticket(ro):
     fs = ro.mirror(FsRead, "/fs/read")
     handle = fs.open_read("src/main.py")
     assert handle["size"] == 12
     assert handle["mtime"] == (ro.workspace / "src" / "main.py").stat().st_mtime
     assert set(handle) == {"ticket", "size", "mtime", "ttl"}
-    assert handle["ticket"].startswith("node/tickets/@")
+    assert handle["ticket"].startswith("node/tickets/")
     assert len(ro.tickets) == 1
-    assert list(ro.z.get("node/tickets/**", timeout=0.5)) == []
 
 
 @pytest.mark.parametrize("path", [
@@ -122,7 +139,7 @@ def open_write(s, path, truncate=True):
 
 def test_open_write_mints_a_ticket(rw):
     handle = rw.mirror(FsWrite, "/fs/write").open_write("new.txt", truncate=True)
-    assert handle["ticket"].startswith("node/tickets/@")
+    assert handle["ticket"].startswith("node/tickets/")
     assert handle["size"] == 0
     assert (rw.workspace / "new.txt").exists()   # opened, as with O_CREAT
     assert len(rw.tickets) == 1
@@ -786,7 +803,7 @@ def test_stream_ranges_survive_faults(ro, flaky_reader, seed):
 
 def test_stream_gives_up_when_nothing_answers(ro):
     with pytest.raises(client.NoReply):
-        list(client.stream(ro.z, "node/tickets/@nothing-here", timeout=0.1, retries=2, backoff=0.001,
+        list(client.stream(ro.z, "node/tickets/nothing-here", timeout=0.1, retries=2, backoff=0.001,
                            heartbeat=None))
 
 
@@ -799,7 +816,7 @@ def test_files_share_the_write_pool(rw):
 
 def test_abandoned_file_frees_its_workers(rw):
     # Nothing answers, so each write would resend for ~5 s. Abandoned, it stops at its next resend.
-    f = client.RemoteFile(rw.z, "node/tickets/@nothing-here", timeout=0.05, retries=100, backoff=0.001,
+    f = client.RemoteFile(rw.z, "node/tickets/nothing-here", timeout=0.05, retries=100, backoff=0.001,
                           heartbeat=None)
     for offset in range(4):
         f.write(offset, b"x")
@@ -808,7 +825,7 @@ def test_abandoned_file_frees_its_workers(rw):
 
 
 def test_write_gives_up_when_nothing_answers(rw):
-    f = client.RemoteFile(rw.z, "node/tickets/@nothing-here", timeout=0.1, retries=2)
+    f = client.RemoteFile(rw.z, "node/tickets/nothing-here", timeout=0.1, retries=2)
     f.write(0, b"x")
     with pytest.raises(client.NoReply):
         f.wait()

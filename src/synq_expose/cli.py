@@ -22,6 +22,7 @@ from synq_expose.config import (
     SandboxConfig,
     ZenohConfigError,
     build_zenoh_config,
+    default_topic,
     default_zenoh_config_path,
 )
 
@@ -150,7 +151,8 @@ def share(
     ),
     topic: Optional[str] = typer.Option(
         None, "--topic", "-t",
-        help="Topic to publish under. Default: ./expose/<folder-name> (→ <hostname>/expose/<folder-name>).",
+        help="Topic to publish at, under <hostname>. Default: the folder's absolute path "
+             "(/home/me/proj → <hostname>/home/me/proj).",
     ),
 
     # ── Capabilities (all off by default except read) ───────────────────
@@ -236,13 +238,18 @@ def share(
             raise fail("sandbox/exec options require --allow-execute")
     if not sandbox and (allow_network or bind or bind_ro):
         raise fail("--allow-network/--bind/--bind-ro configure the sandbox; drop them or drop --no-sandbox")
+    if topic is None:
+        try:
+            topic = default_topic(workspace)
+        except ValueError as e:
+            raise fail(str(e))
 
     endpoints, enrolled = enroll_with_servers(connect)
     zenoh_cfg = zenoh_config_from_flags(zenoh_config, zenoh, endpoints, listen, public, enrolled)
 
     config = ExposeConfig(
         workspace=workspace,
-        topic=topic or f"./expose/{workspace.name}",
+        topic=topic,
         allow_write=allow_write,
         allow_execute=allow_execute,
         exclude=(*(DEFAULT_EXCLUDES if default_excludes else ()), *exclude),

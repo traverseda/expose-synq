@@ -1,14 +1,18 @@
-"""Tickets: short-lived byte streams at ``<root>/tickets/@<secret>``.
+"""Tickets: short-lived byte streams at ``<root>/tickets/<secret>``.
 
 A ticket is a key prefix with a few raw zenoh queryables under it, not a
 SpiriSynq object, so it has no ``sr_metadata`` or schema. ``<root>`` is the
 node's base topic (e.g. ``azrael``), not the workspace topic. That keeps every
 ticket on a node under one prefix.
 
-Zenoh wildcards never match an ``@`` segment, so a ticket can't be found by a
-wildcard query or subscription. Only someone who knows the exact key can reach
-it. It's a bearer secret: anyone who learns the key can use it. This prototype
-has no other access control (see the README).
+A ticket's key is a bearer secret: anyone who learns it can use it. For now
+the secret is an ordinary chunk, so a wildcard query or subscription on
+``<root>/**`` reaches tickets too. Ticket routes ignore any query that doesn't
+name them exactly, so a wildcard ``get`` can't close or kill anything, but a
+wildcard subscription sees stream data. It used to be a verbatim ``@`` chunk, which
+no wildcard matches, but no zenoh ACL rule can match one either, so a router
+confining a node to ``<root>/**`` blocked every ticket. This prototype has no
+other access control (see the README).
 
 Every stream is query-shaped, not pub/sub. Each request gets a reply or
 ``reply_err``, and multi-reply queries carry data back. The route handlers
@@ -92,20 +96,20 @@ class TicketRegistry:
         """
         if "heartbeat" in routes:
             raise ValueError("'heartbeat' is served by the registry")
-        ticket = Ticket(f"{self.prefix}/@{secrets.token_hex(16)}", kind, on_revoke)
+        ticket = Ticket(f"{self.prefix}/{secrets.token_hex(16)}", kind, on_revoke)
         routes = {**routes, "heartbeat": self._heartbeat}
         for name, handler in routes.items():
             key = f"{ticket.key}/{name}" if name else ticket.key
-            ticket.queryables.append(self._session.declare_queryable(key, self._dispatch(ticket, handler)))
+            ticket.queryables.append(self._session.declare_queryable(key, self._dispatch(ticket, key, handler)))
         with self._lock:
             self._tickets[ticket.key] = ticket
-        logger.debug(f"Minted {kind} ticket {self.prefix}/@{ticket.key.rsplit('@', 1)[1][:4]}…")
+        logger.debug(f"Minted {kind} ticket {self.prefix}/{ticket.key.rsplit('/', 1)[1][:4]}…")
         return ticket
 
     def _heartbeat(self, query: zenoh.Query) -> None:
         query.reply(query.key_expr, json.dumps({"ttl": self.ttl}), encoding=zenoh.Encoding.APPLICATION_JSON)
 
-    def _dispatch(self, ticket: Ticket, handler: Handler):
+    def _dispatch(self, ticket: Ticket, key: str, handler: Handler):
         def run(query: zenoh.Query):
             try:
                 if ticket.done:
@@ -121,6 +125,11 @@ class TicketRegistry:
                 query.drop()
 
         def callback(query: zenoh.Query):
+            # A wildcard query (`get <root>/**`) reaches every ticket's routes,
+            # close and kill included. Only a query naming this route is for it.
+            if str(query.key_expr) != key:
+                query.drop()
+                return
             try:
                 self._pool.submit(run, query)
             except RuntimeError:  # pool shut down: the registry is closing
