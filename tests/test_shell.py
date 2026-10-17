@@ -7,7 +7,6 @@ import time
 import pytest
 from SpiriSynq.remote_callables import RpcException
 
-from conftest import stub
 from synq_expose import client
 from synq_expose.config import ExecConfig, SandboxConfig
 from synq_expose.shell import Shell
@@ -341,7 +340,6 @@ def eventually_gone(pid: int, timeout=5.0) -> bool:
 # ── Sandbox ─────────────────────────────────────────────────────────────────
 
 @needs_bwrap
-@stub
 def test_sandbox_workspace_read_only_without_write(share):
     s = share(allow_execute=True, sandbox=True)
     p = spawn(s, ["touch", "x"])
@@ -350,23 +348,31 @@ def test_sandbox_workspace_read_only_without_write(share):
 
 
 @needs_bwrap
-@stub
 def test_sandbox_hides_excluded(share):
     s = share(allow_execute=True, sandbox=True)
     (s.workspace / ".env").write_text("SECRET=1")
     assert b"SECRET" not in output(spawn(s, "cat .env 2>&1 || true"))
 
 
+def interfaces(s) -> set[str]:
+    """Interfaces in the command's network namespace, from its own /proc."""
+    lines = output(spawn(s, ["cat", "/proc/net/dev"])).decode().splitlines()[2:]
+    return {line.split(":")[0].strip() for line in lines}
+
+
 @needs_bwrap
-@stub
+def test_sandbox_has_network_by_default(share):
+    s = share(allow_execute=True, sandbox=True)
+    assert interfaces(s) - {"lo"}
+
+
+@needs_bwrap
 def test_sandbox_without_network(share):
     s = share(allow_execute=True, exec=ExecConfig(sandbox=SandboxConfig(allow_network=False)))
-    assert output(spawn(s, ["cat", "/sys/class/net/lo/operstate"])) != b""
-    assert b"eth" not in output(spawn(s, ["ls", "/sys/class/net"]))
+    assert interfaces(s) == {"lo"}
 
 
 @needs_bwrap
-@stub
 def test_sandbox_cant_see_home(share):
     s = share(allow_execute=True, sandbox=True)
     p = spawn(s, "ls ~/.ssh")
@@ -374,7 +380,6 @@ def test_sandbox_cant_see_home(share):
 
 
 @needs_bwrap
-@stub
 def test_sandboxed_pty(share):
     s = share(allow_execute=True, sandbox=True)
     p = spawn(s, ["sleep", "30"], pty=True)

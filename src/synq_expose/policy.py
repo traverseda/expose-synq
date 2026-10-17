@@ -4,6 +4,7 @@ Every remote path goes through :meth:`PathPolicy.resolve` before it touches
 the filesystem. Remote paths are always relative to the workspace root.
 """
 import errno
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +79,23 @@ class PathPolicy:
         """Whether a host path under the root is exposed, and should show up in listings/globs."""
         key = self._match_key(path, is_dir)
         return key is None or not self.exclude.match_file(key)
+
+    def hidden(self) -> list[Path]:
+        """The excluded paths that exist under the root right now, outermost only, for the sandbox to mask.
+
+        Walks the whole workspace (not into excluded directories or symlinks), so it costs a tree walk.
+        """
+        if not self.exclude.patterns:
+            return []
+        found = []
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            here = Path(dirpath)
+            for name in list(dirnames):
+                if not self.is_visible(here / name):
+                    found.append(here / name)
+                    dirnames.remove(name)
+            found += [here / name for name in filenames if not self.is_visible(here / name)]
+        return found
 
     def is_writable(self, path: Path, is_dir: bool | None = None) -> bool:
         """Whether a host path under the root may be changed. Doesn't check visibility."""

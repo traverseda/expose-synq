@@ -92,8 +92,10 @@ class Shell(SyncableObject):
             term = (int(spec.get("rows", 24)), int(spec.get("cols", 80)), str(spec.get("term", "xterm-256color")))
         limits = [t for t in (timeout, cfg.timeout) if t]
         env = {k: os.environ[k] for k in (*BASE_ENV, *cfg.pass_env) if k in os.environ}
-        argv = wrap_command(argv, workspace=self._policy.root, writable=self._config.allow_write,
-                            hidden=[], config=cfg)  # TODO: hidden: the excluded paths, for the sandbox
+        if cfg.sandbox.enabled:
+            argv = wrap_command(argv, workspace=self._policy.root, writable=self._config.allow_write,
+                                hidden=self._policy.hidden(), config=cfg, pty=term is not None,
+                                home=env.get("HOME"))
 
         with _running_lock:
             if self.running >= self.max_procs:

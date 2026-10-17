@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from conftest import stub
 from synq_expose.config import ExecConfig, SandboxConfig
 from synq_expose.sandbox import wrap_command
 
@@ -21,7 +20,6 @@ def test_unsandboxed_runs_argv_as_is(tmp_path):
     assert wrap(tmp_path, enabled=False) == ["make", "test"]
 
 
-@stub
 def test_sandboxed_argv(tmp_path):
     argv = wrap(tmp_path)
     assert Path(argv[0]).name == "bwrap"
@@ -32,6 +30,5 @@ def test_sandboxed_argv(tmp_path):
     assert str(tmp_path / ".env") in argv
 
 
-@stub
 def test_no_network(tmp_path):
     assert "--share-net" not in wrap(tmp_path, allow_network=False)
