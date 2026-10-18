@@ -512,7 +512,7 @@ def share_options(fn):
 
 @app.command("completion")
 def completion_script(shell: completion.Shell):
-    """Print the tab-completion script for SHELL. It completes share topics from those found last time.
+    """Print the tab-completion script for SHELL. It completes share topics, and the paths after TOPIC:.
 
     zsh: expose-synq completion zsh > ~/.zfunc/_expose-synq, with ~/.zfunc in $fpath before compinit.
     bash: expose-synq completion bash > ~/.local/share/bash-completion/completions/expose-synq,
@@ -521,11 +521,18 @@ def completion_script(shell: completion.Shell):
     typer.echo(completion.script(shell, "expose-synq"), nl=False)
 
 
-@app.command("_refresh-topics", hidden=True)
-@share_options
-def refresh_topics(*, conn: Conn):
-    """Look up the shares on the network for tab completion; --timeout is how long to listen. Run by completion."""
-    completion.refresh(conn.zenoh_config, completion.cache_path(), conn.timeout)
+@app.command("_complete-server", hidden=True)
+def complete_server(
+    idle: float = typer.Option(600.0, "--idle", help="Exit after this many seconds without a Tab."),
+    zenoh_config: ZenohConfigFile = None,
+):
+    """Answer tab completion over a socket, with a zenoh session kept open. Started by the completion script."""
+    from synq_expose.complete_server import serve
+    quiet_logs()
+    if zenoh_config is None and default_zenoh_config_path().is_file():
+        zenoh_config = default_zenoh_config_path()
+    serve(zenoh_config_from_flags(zenoh_config, [], [], [], False),
+          watch=[zenoh_config or default_zenoh_config_path()], idle=idle)
 
 
 # ── expose-synq file ────────────────────────────────────────────────────

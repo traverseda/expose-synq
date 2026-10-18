@@ -187,7 +187,16 @@ expose-synq completion zsh > ~/.zfunc/_expose-synq    # with ~/.zfunc in $fpath 
 expose-synq completion bash > ~/.local/share/bash-completion/completions/expose-synq   # or source it from ~/.bashrc
 ```
 
-Commands and options complete as usual. So do share topics, for `mount`, `run --topic`, and the `TOPIC:` of a file command's `TOPIC:PATH`, but not the path after it. Topics come from the ones found last time, in `~/.cache/expose-synq/topics`, since asking the network takes a second or more. When that file is over 30 seconds old, a Tab starts `expose-synq _refresh-topics` in the background, so the next Tab sees what it found. The refresh uses your default zenoh config (`setup`'s, and the `EXPOSE_SYNQ_ZENOH*` variables), not the `--connect` on the line being completed. The first Tab ever finds nothing, and a share that stopped stays listed until the next refresh. Regenerate the script after upgrading.
+Commands and options complete, and so do share topics (for `mount` and `run --topic`) and remote paths: `TOPIC:PATH` in the file commands, or a bare path with `$EXPOSE_SYNQ_TOPIC` set.
+
+A Tab is answered by `expose-synq _complete-server`, a background process with a zenoh session kept open, in a few milliseconds: the shell talks to it directly, so no Python starts. zsh connects over a Unix socket in `$XDG_RUNTIME_DIR/expose-synq/`, and bash, which can't, over TCP on 127.0.0.1 with a token from a file only you can read. The server:
+
+- checks for shares every 5 seconds, so a new one shows up within about that;
+- lists directories with the share's `list_dir`, keeping each listing for 5 seconds. A Tab gets an answer within 0.3 seconds, and a listing that takes longer is there for the next Tab. Each listing is an ordinary read, so it shows in the share's `--audit-log`;
+- exits after 10 minutes without a Tab, or after a Tab once your zenoh config or expose-synq itself has changed;
+- uses your default zenoh config (`setup`'s, and the `EXPOSE_SYNQ_ZENOH*` variables), not the `--connect` on the line being completed.
+
+When it isn't running, the first Tab starts it and is answered the slow way (about 0.1 seconds), from the topics it last saw (`~/.cache/expose-synq/topics`) and without paths. Regenerate the script after upgrading.
 
 ## Limitation: no access control
 
