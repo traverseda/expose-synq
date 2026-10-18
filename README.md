@@ -139,7 +139,7 @@ A process lasts as long as its ticket. When the ticket is closed, or goes `ttl` 
 
 A share's topic is the folder's absolute path under the node's base topic: `share /home/me/proj` on `host` is `host/home/me/proj`, so any number of shares on one host stay apart. `--topic` picks another one, still under the base topic. A path that can't be a key expression (a chunk with `*`, `$`, `#` or `?`, or starting with `@`), `/` and `/tickets` need `--topic`. Shares nest: `host/home/me` and `host/home/me/proj` can both be shared, and discovery at one ignores the other. Asking for a topic with no share at it lists the shares under it.
 
-Find shares with `synq topic list --type FsRead`: a share's topic is its FsRead's, without `/fs/read`.
+Find shares with `synq topic list --type FsRead`: a share's topic is its FsRead's, without `/fs/read`. Or press Tab: see [Tab completion](#tab-completion).
 
 ## Mounting
 
@@ -179,6 +179,15 @@ expose-synq file mkdir -p a/b            # also rm [-r], mv, chmod 644 PATH
 ```
 
 Each does what its method does and no more: `push` writes in place, with no temp file and rename (push, then `mv`, for that), and `mv` works only within one share.
+
+## Tab completion
+
+```bash
+expose-synq completion zsh > ~/.zfunc/_expose-synq    # with ~/.zfunc in $fpath before compinit
+expose-synq completion bash > ~/.local/share/bash-completion/completions/expose-synq   # or source it from ~/.bashrc
+```
+
+Commands and options complete as usual. So do share topics, for `mount`, `run --topic`, and the `TOPIC:` of a file command's `TOPIC:PATH`, but not the path after it. Topics come from the ones found last time, in `~/.cache/expose-synq/topics`, since asking the network takes a second or more. When that file is over 30 seconds old, a Tab starts `expose-synq _refresh-topics` in the background, so the next Tab sees what it found. The refresh uses your default zenoh config (`setup`'s, and the `EXPOSE_SYNQ_ZENOH*` variables), not the `--connect` on the line being completed. The first Tab ever finds nothing, and a share that stopped stays listed until the next refresh. Regenerate the script after upgrading.
 
 ## Limitation: no access control
 

@@ -14,6 +14,7 @@ import click
 import typer
 from rich.console import Console
 
+from synq_expose import completion
 from synq_expose.config import (
     DEFAULT_EXCLUDES,
     ExecConfig,
@@ -26,7 +27,9 @@ from synq_expose.config import (
     default_zenoh_config_path,
 )
 
+# Completion scripts come from `expose-synq completion`; Typer's own install would replace our shell classes.
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+completion.register()
 
 # stdout is kept free for machine-readable output; status goes to stderr
 console_err = Console(stderr=True)
@@ -328,6 +331,7 @@ def print_banner(config: ExposeConfig, path: str) -> None:
 def mount(
     topic: str = typer.Argument(
         ..., help="The share's topic, e.g. <hostname>/expose/<folder>, as `synq topic list --type FsRead` shows it (without /fs/read).",
+        autocompletion=completion.complete_topic,
     ),
     mountpoint: Path = typer.Argument(..., exists=True, file_okay=False, resolve_path=True),
     timeout: float = typer.Option(10.0, "--timeout", help="Seconds to wait for the share to answer."),
@@ -379,6 +383,7 @@ def run(
     topic: str = typer.Option(
         ..., "--topic", envvar=TOPIC_ENV, show_envvar=True,
         help="The share's topic, e.g. <hostname>/expose/<folder>, as `synq topic list --type FsRead` shows it (without /fs/read).",
+        autocompletion=completion.complete_topic,
     ),
     command: list[str] = typer.Argument(
         ..., help="The command and its arguments, run as argv in the share's workspace. Options after it are its own.",
@@ -505,6 +510,24 @@ def share_options(fn):
     return wrapper
 
 
+@app.command("completion")
+def completion_script(shell: completion.Shell):
+    """Print the tab-completion script for SHELL. It completes share topics from those found last time.
+
+    zsh: expose-synq completion zsh > ~/.zfunc/_expose-synq, with ~/.zfunc in $fpath before compinit.
+    bash: expose-synq completion bash > ~/.local/share/bash-completion/completions/expose-synq,
+    or source the script from ~/.bashrc. Regenerate it after upgrading.
+    """
+    typer.echo(completion.script(shell, "expose-synq"), nl=False)
+
+
+@app.command("_refresh-topics", hidden=True)
+@share_options
+def refresh_topics(*, conn: Conn):
+    """Look up the shares on the network for tab completion; --timeout is how long to listen. Run by completion."""
+    completion.refresh(conn.zenoh_config, completion.cache_path(), conn.timeout)
+
+
 # ── expose-synq file ────────────────────────────────────────────────────
 
 file_app = typer.Typer(
@@ -515,7 +538,11 @@ file_app = typer.Typer(
 )
 app.add_typer(file_app, name="file")
 
-Remote = Annotated[str, typer.Argument(metavar="[TOPIC:]PATH", help="A path on the share.")]
+def remote_argument(help: str):
+    return typer.Argument(metavar="[TOPIC:]PATH", help=help, autocompletion=completion.complete_remote)
+
+
+Remote = Annotated[str, remote_argument("A path on the share.")]
 Json = Annotated[bool, typer.Option("--json", help="One JSON object per line, as the method returns it.")]
 
 
@@ -533,7 +560,7 @@ def stdout_bytes():
 
 @file_app.command("ls")
 @share_options
-def file_ls(path: Annotated[str, typer.Argument(metavar="[TOPIC:]PATH", help="A directory on the share.")] = ".",
+def file_ls(path: Annotated[str, remote_argument("A directory on the share.")] = ".",
             as_json: Json = False, *, conn: Conn):
     """List a directory: type and mode, size, mtime and name, by name."""
     from synq_expose.files import ls_line
@@ -567,7 +594,7 @@ def file_hash(path: Remote, algorithm: str = typer.Option("sha256", "--algorithm
 @file_app.command("glob")
 @share_options
 def file_glob(pattern: str = typer.Argument(..., help="Relative to PATH; * within a segment, ** across them."),
-              path: Annotated[str, typer.Argument(metavar="[TOPIC:]PATH", help="Where to search.")] = ".",
+              path: Annotated[str, remote_argument("Where to search.")] = ".",
               *, conn: Conn):
     """Print the workspace-relative paths under PATH matching PATTERN, one per line."""
     topic, path = remote(path)
@@ -579,7 +606,7 @@ def file_glob(pattern: str = typer.Argument(..., help="Relative to PATH; * withi
 @file_app.command("grep")
 @share_options
 def file_grep(pattern: str = typer.Argument(..., help="A Python regex."),
-              path: Annotated[str, typer.Argument(metavar="[TOPIC:]PATH", help="A file or a directory to search.")] = ".",
+              path: Annotated[str, remote_argument("A file or a directory to search.")] = ".",
               as_json: Json = False, *, conn: Conn):
     """Print path:line:text for each matching line, as grep -rn. Exits 1 if nothing matched, 2 on an error."""
     from synq_expose.files import grep_line
