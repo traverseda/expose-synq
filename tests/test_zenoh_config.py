@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import zenoh
 
 from synq_expose.config import ZenohConfigError, build_zenoh_config
 
@@ -67,15 +68,14 @@ def test_bad_override_syntax():
         build_zenoh_config(overrides=["no-equals-sign"], environ={})
 
 
-def test_public_enables_scouting_but_not_listening():
-    config = build_zenoh_config(environ={}, public=True)
-    assert get(config, "scouting/multicast/enabled") is True
-    assert get(config, "scouting/gossip/enabled") is True
-    assert get(config, "listen/endpoints") == []
+def test_public_is_zenohs_own_defaults():
+    config, default = build_zenoh_config(environ={}, public=True), zenoh.Config()
+    for key in ("mode", "listen", "connect", "scouting", "adminspace"):
+        assert get(config, key) == get(default, key)
 
 
 def test_public_can_be_narrowed_by_later_layers():
     environ = {"EXPOSE_SYNQ_ZENOH__SCOUTING__MULTICAST__INTERFACE": "eth1"}
     config = build_zenoh_config(environ=environ, public=True)
-    assert get(config, "scouting/multicast/enabled") is True
+    assert get(config, "scouting/multicast/enabled") is not False   # null: zenoh's default, on
     assert get(config, "scouting/multicast/interface") == "eth1"

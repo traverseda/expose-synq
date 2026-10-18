@@ -192,7 +192,7 @@ Who can reach the node is zenoh's job: TLS and `transport/auth` in its config (s
 
 By default expose-synq doesn't listen, connect or scout at all. You open up connectivity, and secure it, through zenoh's own config: TLS, `transport/auth` and `access_control`. Each layer below overrides the ones above it:
 
-1. the locked-down base; `--public` adds zenoh's normal multicast and gossip scouting on top. It opens no listener: peers are reached by connecting out to the listeners they advertise.
+1. the locked-down base, or with `--public` zenoh's own default config instead (scouting, and a listener on a random port).
 2. a JSON5 config file: `--zenoh-config FILE`, `EXPOSE_SYNQ_ZENOH_CONFIG` or `ZENOH_CONFIG`, else `~/.config/expose-synq/zenoh.json5` if `expose-synq setup` wrote one; then the config each server handed `share` on [enrollment](#enrolling-with-a-server)
 3. one environment variable per key: `EXPOSE_SYNQ_ZENOH__` followed by the key path, with `__` between segments
 4. `-Z KEY=VALUE` flags

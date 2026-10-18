@@ -40,8 +40,8 @@ def fail(message: str) -> typer.Exit:
 # zenoh connection options, shared by every command that opens a session
 Public = Annotated[bool, typer.Option(
     "--public",
-    help="Turn on zenoh's normal multicast + gossip scouting, so peers on the network find "
-         "and connect to us. Opens no listener by itself (see --listen).",
+    help="Use zenoh's own default config instead of the locked-down one: scouting and a "
+         "listener, so peers on the network find and connect to us.",
 )]
 Connect = Annotated[list[str], typer.Option(
     "--connect", "-c",

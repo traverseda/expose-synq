@@ -57,7 +57,7 @@ class ExposeConfig:
 #
 # Layers, later wins:
 #   1. LOCKED_DOWN: no listening, connecting or scouting
-#      (+ PUBLIC with --public: zenoh's normal scouting)
+#      (left out with --public: zenoh's own defaults instead)
 #   2. the config file (--zenoh-config / EXPOSE_SYNQ_ZENOH_CONFIG / ZENOH_CONFIG,
 #      else ~/.config/expose-synq/zenoh.json5 if `expose-synq setup` wrote one),
 #      then the layers servers handed us on enrollment (synq_expose.enroll)
@@ -78,15 +78,6 @@ LOCKED_DOWN: dict[str, Any] = {
         "gossip": {"enabled": False},
     },
     "adminspace": {"enabled": False},
-}
-
-# Scouting alone is enough to be reached: we autoconnect out to the listeners
-# other peers advertise, so --public doesn't need to open a listener.
-PUBLIC: dict[str, Any] = {
-    "scouting": {
-        "multicast": {"enabled": True},
-        "gossip": {"enabled": True},
-    },
 }
 
 ENV_PREFIX = "EXPOSE_SYNQ_ZENOH__"
@@ -176,9 +167,7 @@ def build_zenoh_config(
     public: bool = False,
     enrolled: list[Mapping[str, Any]] = (),
 ) -> zenoh.Config:
-    layers = [LOCKED_DOWN]
-    if public:
-        layers.append(PUBLIC)
+    layers = [] if public else [LOCKED_DOWN]
     if config_file is not None:
         try:
             layers.append(json5.loads(config_file.read_text()))

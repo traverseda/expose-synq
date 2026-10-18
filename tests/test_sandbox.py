@@ -1,4 +1,7 @@
+import shutil
 from pathlib import Path
+
+import pytest
 
 from synq_expose.config import ExecConfig, SandboxConfig
 from synq_expose.sandbox import wrap_command
@@ -20,6 +23,10 @@ def test_unsandboxed_runs_argv_as_is(tmp_path):
     assert wrap(tmp_path, enabled=False) == ["make", "test"]
 
 
+needs_bwrap = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+
+
+@needs_bwrap
 def test_sandboxed_argv(tmp_path):
     argv = wrap(tmp_path)
     assert Path(argv[0]).name == "bwrap"
@@ -30,5 +37,6 @@ def test_sandboxed_argv(tmp_path):
     assert str(tmp_path / ".env") in argv
 
 
+@needs_bwrap
 def test_no_network(tmp_path):
     assert "--share-net" not in wrap(tmp_path, allow_network=False)
