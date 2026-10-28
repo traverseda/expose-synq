@@ -27,6 +27,7 @@ Protocol, relative to ``<server>/expose/api``:
 """
 import base64
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -54,6 +55,14 @@ RESERVED = {KEY_FILE, REQUEST_FILE, CREDENTIAL_FILE}
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 POLL_DEFAULT, POLL_MIN, POLL_MAX = 3.0, 1.0, 60.0
 HTTP_TIMEOUT = 30.0
+
+
+def user_agent() -> str:
+    try:
+        version = importlib.metadata.version("expose-synq")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    return f"expose-synq/{version} (+https://github.com/traverseda/expose-synq)"
 
 
 class EnrollError(RuntimeError):
@@ -188,7 +197,8 @@ def call(url: str, method: str, path: str, payload: dict | None = None, *,
     data = json.dumps(payload).encode() if payload is not None else None
     while True:
         req = urllib.request.Request(url + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json", "Accept": "application/json"})
+                                     headers={"Content-Type": "application/json", "Accept": "application/json",
+                                              "User-Agent": user_agent()})
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
                 return response.status, parse_body(response.read())

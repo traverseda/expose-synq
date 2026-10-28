@@ -8,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from synq_expose.enroll import API, EnrollError, enroll, fingerprint, is_server, server_url, state_dir
+from synq_expose.enroll import API, EnrollError, enroll, fingerprint, is_server, server_url, state_dir, user_agent
 
 
 class FakeServer:
@@ -23,6 +23,7 @@ class FakeServer:
         self.code_override = None
         self.fail_next = 0               # answer this many requests with 503 first
         self.posts, self.gets = [], []
+        self.agents = []                 # User-Agent of every request, in order
         self.forget = False              # answer GETs 404 until the next POST
         server = self
 
@@ -48,6 +49,7 @@ class FakeServer:
             def do_POST(self):
                 if self.failing():
                     return
+                server.agents.append(self.headers.get("User-Agent"))
                 assert self.path == API
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 server.posts.append(body)
@@ -61,6 +63,7 @@ class FakeServer:
             def do_GET(self):
                 if self.failing():
                     return
+                server.agents.append(self.headers.get("User-Agent"))
                 request_id = self.path.removeprefix(API + "/")
                 server.gets.append(request_id)
                 if server.forget or not request_id.startswith("req"):
@@ -146,6 +149,14 @@ def test_waits_for_approval_and_saves_the_credential(server, tmp_path):
     for name in ("key.pem", "cert.pem", "ca.pem", "credential.json"):
         assert stat.S_IMODE((directory / name).stat().st_mode) == 0o600
     assert not (directory / "request.json").exists()
+
+
+def test_identifies_itself_with_a_user_agent(server, tmp_path):
+    server.decisions = [approval()]
+    run(server, tmp_path)
+    assert server.agents
+    assert all(agent == user_agent() for agent in server.agents)
+    assert user_agent().startswith("expose-synq/")
 
 
 def test_a_saved_credential_is_used_without_asking(server, tmp_path):
