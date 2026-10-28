@@ -1,6 +1,6 @@
 [project]
 name = "expose-synq"
-version = "0.3.0"
+version = "0.3.1"
 description = "Expose a local workspace (files, sandboxed exec) to remote agents over SpiriSynq"
 readme = "README.md"
 license = "GPL-3.0-or-later"
